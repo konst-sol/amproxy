@@ -103,7 +103,6 @@ def load_rules():
                     FAILED.append((domen, int(test_time)))
         except Exception as err:
             debug(f'[Ex] {err}')
-        info(f'[*] Загружено {len(RULES)} правил')
 
 def save_rules():
     debug('сохранение правил')
