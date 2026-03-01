@@ -8,7 +8,6 @@ import pycurl
 pycurl.global_init(pycurl.GLOBAL_ALL)
 import threading
 import subprocess
-import json
 # для логирования
 import traceback
 import logging, logging.handlers
@@ -27,17 +26,17 @@ DIRECT_FILE = 'direct.txt'
 FAILED_FILE = 'failed.txt'
 TEST_TIMEOUT = 2 # таймаут для проверки доступности и поиска стратегии (секунды)
 TEST_CONNECTTIMEOUT = 2 # таймаут на установку соединения
-CHECK_TIMEOUT = 600 # таймаут для всего времени проверки (секунды)
+CHECK_TIMEOUT = 60 # таймаут для всего времени проверки (секунды)
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else './ciadpi'
 LOG_LEVEL = logging.DEBUG # logging.INFO/logging.ERROR для обычного использования
-LOG_FILE = sys.argv[0].split()[0]+'.log'
+LOG_FILE = sys.argv[0].split('.')[0]+'.log'
 # </НАСТРОЙКИ>
 
 # <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 # сохраненные правила для доменов
 RULES = {} # {domen: strategy|"DIRECT"}
 RULES_TEST_TIME = {} # {domen: test_time}
-FAILED = [] # (domen, test_time) домены для которых не найдена стратегия
+FAILED = [] # [(domen, test_time), ...] домены для которых не найдена стратегия
 # Служебные данные процессов
 param_to_port = {} # {params: port}
 active_processes = {} # {port: subprocess.Popen}
@@ -96,6 +95,15 @@ def load_rules():
         except Exception as err:
             debug(f'[Ex] {err}')
         info(f'[*] Загружено {len(RULES)} правил')
+    if os.path.exists(FAILED_FILE):
+        try:
+            with open(FAILED_FILE, 'r', encoding='utf-8') as f:
+                for s in f:
+                    domen, test_time = s.split()
+                    FAILED.append((domen, int(test_time)))
+        except Exception as err:
+            debug(f'[Ex] {err}')
+        info(f'[*] Загружено {len(RULES)} правил')
 
 def save_rules():
     debug('сохранение правил')
@@ -144,7 +152,7 @@ def test_url(url, proxy_port=None):
     c.setopt(c.CONNECTTIMEOUT, TEST_CONNECTTIMEOUT) # Время установки коннекта
     c.setopt(c.TIMEOUT, TEST_TIMEOUT)  # время сквчивания всей страницы
     # Ограничиваем максимальный размер (нам не нужно качать гигабайты)
-    # 100 КБ обычно достаточно, чтобы понять, работает ли стратегия
+    # 100 КБ обычно НЕ достаточно, чтобы понять, работает ли стратегия
     #c.setopt(c.MAXFILESIZE, 102400)
 
     try:
@@ -179,6 +187,7 @@ def test_url(url, proxy_port=None):
 
 def run_tester(target_domain):
     # проверка доступности и подбор параметров, если напрямую не вышло
+    # возвращает стратегию или 'DIRECT'
     url = f'https://{target_domain}'
 
     # Проверяем доступен ли ресурс напрямую
@@ -411,5 +420,5 @@ def start_proxy():
 
 #
 start_proxy()
-
+pycurl.global_cleanup()
 #
