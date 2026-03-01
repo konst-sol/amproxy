@@ -16,8 +16,6 @@ import queue
 
 # <НАСТРОЙКИ>
 HTTP_PROXY_PORT = 8888 # порт этой программы
-START_PORT = 9000 # стартовый порт для клиентских ciadpi
-TEST_PORT = 9999 # порт для поиска стратегии
 STRATEGIES_FILE = 'params.txt'
 #STRATEGIES_FILE = 'strats.txt'
 STRATEGIES = [] # список тестируемых стратегий
@@ -94,15 +92,16 @@ def load_rules():
                     RULES_TEST_TIME[domen] = int(test_time)
         except Exception as err:
             debug(f'[Ex] {err}')
+            pass
         info(f'[*] Загружено {len(RULES)} правил')
-    if os.path.exists(FAILED_FILE):
-        try:
-            with open(FAILED_FILE, 'r', encoding='utf-8') as f:
-                for s in f:
-                    domen, test_time = s.split()
-                    FAILED.append((domen, int(test_time)))
-        except Exception as err:
-            debug(f'[Ex] {err}')
+    # if os.path.exists(FAILED_FILE):
+    #     try:
+    #         with open(FAILED_FILE, 'r', encoding='utf-8') as f:
+    #             for s in f:
+    #                 domen, test_time = s.split()
+    #                 FAILED.append((domen, int(test_time)))
+    #     except Exception as err:
+    #         debug(f'[Ex] {err}')
 
 def save_rules():
     debug('сохранение правил')
@@ -113,25 +112,23 @@ def save_rules():
                 print(f'{domen} {RULES_TEST_TIME[domen]}', file=d)
             else:
                 print(f'{domen} {RULES_TEST_TIME[domen]} {RULES[domen]}', file=f)
-    with open(FAILED_FILE, 'w', encoding='utf-8') as f:
+    with open(FAILED_FILE, 'a', encoding='utf-8') as f:
+        # добавляем в конец
         for domen, test_time in FAILED:
             print(f'{domen} {test_time}', file=f)
 
-def is_port_in_use(port, host='127.0.0.1'): 
+def get_free_port():
+    # ищем свободный порт и возвращаем его
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # connect_ex возвращает 0, если подключение успешно (порт занят)
-        return s.connect_ex((host, port)) == 0
-
-def search_free_port(port, host='127.0.0.1'):
-    while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            # connect_ex возвращает 0, если подключение успешно (порт занят)
-            if s.connect_ex((host, port)) != 0:
-                return port
-        port += 1
-
+        # SO_REUSEADDR позволяет повторно использовать порт сразу после закрытия
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('127.0.0.1', 0)) # 0 - подключится к любому свободному порту
+        # Возвращает кортеж (хост, порт), например ('127.0.0.1', 54321)
+        debug(f'{s.getsockname()[1]}')
+        return s.getsockname()[1]
 
 def test_url(url, proxy_port=None):
+    debug(f'{url}, {proxy_port}')
     # Проверяет, скачивается ли страница целиком.
     c = pycurl.Curl()
     c.setopt(c.URL, url)
@@ -189,11 +186,21 @@ def run_tester(target_domain):
     # возвращает стратегию или 'DIRECT'
     url = f'https://{target_domain}'
 
+    # проверка в FAILED
+    for d, t in FAILED:
+        if d == target_domain:
+            # проверяем сколько времени прошло с момента последней проверки
+            if time.time() - t < 60*60*8: # 8 часов
+                return 'DIRECT'
+            else:
+                break
+
     # Проверяем доступен ли ресурс напрямую
     info(f'[*] Проверка {target_domain} напрямую...')
-    if test_url(url):
-        info(f'[+] {target_domain} доступен НАПРЯМУЮ.')
-        return 'DIRECT'
+    for i in range(3):
+        if test_url(url):
+            info(f'[+] {target_domain} доступен НАПРЯМУЮ.')
+            return 'DIRECT'
 
     # Подбор стратегии через ciadpi
     info(f'[*] Прямой доступ закрыт. Подбор стратегии для {target_domain}...')
@@ -212,16 +219,18 @@ def run_tester(target_domain):
         if time.time()-start_time > CHECK_TIMEOUT:
             debug(f'Подбор стратегии > {CHECK_TIMEOUT} сек. Прерывание')
             return None
-        if is_port_in_use(TEST_PORT):
-            error('ПОРТ ДЛЯ ПРОВЕРКИ ЗАКРЫТ')
-            return None
+        port = get_free_port()
         debug(f'Проверяется стратегия для {target_domain}: {params}')
-        cmd = [CIADPI_EXE, '-p', str(TEST_PORT)] + params.split()
+        cmd = [CIADPI_EXE, '-p', str(port)] + params.split()
         p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
         time.sleep(0.5) # полсекунды на открытие порта
+        if p.poll() is not None:
+            # ciadpi завершился (неправильные параметры, например)
+            debug('ciadpi не запустился')
+            continue
         for i in range(3):
-            if test_url(url, TEST_PORT):
+            if test_url(url, port):
                 info(f'[!] Найдена стратегия для {target_domain}: {params}')
                 p.terminate(); p.wait()
                 return params
@@ -247,6 +256,7 @@ def ensure_ciadpi(port, params):
         return True
     except Exception as err:
         debug(f'[Ex] {err}')
+        pass
     return False
 
 
@@ -319,7 +329,7 @@ def handle_client(client_socket):
 
 
         # Подключение к серверу
-        info(f"Connecting to {host}:{port} [{'HTTPS' if is_https else 'HTTP'}]")
+        info(f"[>] Подключение: {host}:{port} [{'HTTPS' if is_https else 'HTTP'}]")
         remote_socket = socks.socksocket()
         remote_socket.settimeout(60)
 
@@ -327,18 +337,10 @@ def handle_client(client_socket):
             pass
         else:
             # определяем порт ciadpi
-            global START_PORT
             target_port = param_to_port.get(params)
             if not target_port:
+                target_port = param_to_port[params] = get_free_port()
                 # ciadpi еще не запущен
-                # while True:
-                #     # ищем неоткрытый порт
-                #     if is_port_in_use(START_PORT):
-                #         START_PORT += 1
-                #     else:
-                #         break
-                target_port = param_to_port[params] = START_PORT
-                START_PORT += 1
             # запуск ciadpi
             if not ensure_ciadpi(target_port, params):
                 error('ensure_ciadpi вернул False')
@@ -400,9 +402,7 @@ def start_proxy():
     try:
         while True:
             client_sock, _ = server.accept()
-            # Называем потоки для удобства отладки
-            t = threading.Thread(target=handle_client, args=(client_sock,),
-                                 name="ClientHandler")
+            t = threading.Thread(target=handle_client, args=(client_sock,))
             t.daemon = True
             t.start()
     except KeyboardInterrupt:
