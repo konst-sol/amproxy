@@ -27,6 +27,10 @@ TEST_TIMEOUT = 2 # таймаут для проверки доступности
 TEST_CONNECTTIMEOUT = 2 # таймаут на установку соединения
 CHECK_TIMEOUT = 60 # таймаут для всего времени проверки (секунды)
 CURL_THREAD_LIMIT = 10 # сколько потоков использовать для проверки стратегий
+# время устаревания разных статусов в часах
+DIRECT_TTL = 7*24 # прямое подключение
+PROXY_TTL = 7*24 # подключение через ciadpi
+FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
 LOG_LEVEL = logging.DEBUG # logging.INFO/logging.ERROR для обычного использования
 #LOG_LEVEL = logging.INFO
 LOG_FILE = sys.argv[0].split('.')[0]+'.log'
@@ -81,9 +85,9 @@ def setup_logging():
 class DomainInfo:
     TTL = {
         # время устаревания разных статусов
-        'DIRECT': 7*24*60*60, # 7 дней
-        'PROXY': 7*24*60*60,
-        'FAILED': 8*60*60 # 8 часов
+        'DIRECT': DIRECT_TTL*60*60,
+        'PROXY': PROXY_TTL*60*60,
+        'FAILED': FAILED_TTL*60*60
     }
 
     def __init__(self, domain, status=None, test_time=0, params=None):
@@ -392,7 +396,7 @@ def load_rules():
         except Exception as err:
             debug(f'[Ex] {err}')
             pass
-        info(f'[*] Загружено {len(domain_registry)} правил')
+        info(f'[*] Загружены правила для {len(domain_registry)} доменов')
 
 def save_rules():
     debug('сохранение правил')
@@ -418,8 +422,9 @@ def get_free_port():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(('127.0.0.1', 0)) # 0 - подключится к любому свободному порту
         # Возвращает кортеж (хост, порт), например ('127.0.0.1', 54321)
-        debug(f'port: {s.getsockname()[1]}')
-        return s.getsockname()[1]
+        port = s.getsockname()[1]
+        debug(f'port: {port}')
+        return port
 
 
 def ensure_ciadpi(port, params):
@@ -460,7 +465,7 @@ def pipe(source, destination):
         debug(f'[Ex] {err}')
         pass
     finally:
-        # shutdown(SHUT_RD) гарантирует, что recv() во ВТОРОМ потоке 
+        # shutdown(SHUT_RD) гарантирует, что recv() во втором потоке 
         # мгновенно получит пустой байт и завершит цикл.
         try:
             destination.shutdown(socket.SHUT_WR)
@@ -505,7 +510,9 @@ def handle_client(client_socket):
         params = dom.run_test() # получаем стратегию или DIRECT
 
         # Подключение к серверу
-        info(f"[>] Подключение: {host}:{port} [{'HTTPS' if is_https else 'HTTP'}]")
+        info(f'[>] Подключение: {host}:{port} '
+             f'[{"HTTPS" if is_https else "HTTP"}] '
+             f'[{"DIRECT" if params == "DIRECT" else "PROXY"}]')
         remote_socket = socks.socksocket()
         remote_socket.settimeout(60)
 
@@ -535,7 +542,7 @@ def handle_client(client_socket):
             remote_socket.sendall(request)
 
         # Двунаправленная пересылка
-        th = threading.Thread(target=pipe, args=(client_socket, remote_socket), name="Pipe-C2R")
+        th = threading.Thread(target=pipe, args=(client_socket, remote_socket))
         th.daemon = True
         th.start()
         # Основной поток обрабатывает обратное направление
@@ -559,7 +566,7 @@ def start_proxy():
     listener = setup_logging()
 
     global STRATEGIES
-    debug(f'{sys.argv[0]} старт {time.strftime("%d.%m.%Y %H:%M")}')
+    debug(f'{sys.argv[0]} стартовал {time.strftime("%d.%m.%Y %H:%M")}')
     if not os.path.exists(STRATEGIES_FILE):
         info(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
         return
