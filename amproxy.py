@@ -20,14 +20,18 @@ HTTP_PROXY_PORT = 8888 # порт этой программы
 STRATEGIES_FILE = 'params.txt'
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else './ciadpi'
 CIADPI_EXE += ' -i 127.0.0.1'
-RULES_FILE = 'rules.txt'
-DIRECT_FILE = 'direct.txt'
-FAILED_FILE = 'failed.txt'
+# Файлы для кэширования информации о проверках по одному домену на строке
+# в скобках - формат строки
+RULES_FILE = 'rules.txt' # стратегии (домен<пробел>время_проведения_теста<пробел>стратегия)
+USER_RULES_FILE = 'user-rules.txt' # пользовательские стратегии (домен<пробел>стратегия)
+DIRECT_FILE = 'direct.txt' # домены доступные напрямую (домен<пробел>время_проведения_теста)
+FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
 TEST_TIMEOUT = 2 # таймаут для проверки доступности и поиска стратегии (секунды)
 TEST_CONNECTTIMEOUT = 2 # таймаут на установку соединения
 CHECK_TIMEOUT = 60 # таймаут для всего времени проверки (секунды)
-CURL_THREAD_LIMIT = 10 # сколько потоков использовать для проверки стратегий
-# время устаревания разных статусов в часах
+CURL_THREAD_LIMIT = 5 # сколько потоков использовать для проверки стратегий
+NUMBER_OF_TESTS = 3 # количество проверок прямой доступности и каждой стратегии
+# время устаревания разных статусов в часах:
 DIRECT_TTL = 7*24 # прямое подключение
 PROXY_TTL = 7*24 # подключение через ciadpi
 FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
@@ -93,7 +97,9 @@ class DomainInfo:
     def __init__(self, domain, status=None, test_time=0, params=None):
         self.domain = domain
         self.status = status
-        self.test_time = test_time # время последней проверки (в секундах)
+        # если test_time число: время последней проверки (в секундах)
+        # если строка: стратегия добавлена пользователем и не проверяется на TTL
+        self.test_time = test_time
         self.params = params
         self.history_params = []  # Список стратегий, которые работали раньше
         self.lock = threading.Lock() # для проведения теста
@@ -107,7 +113,9 @@ class DomainInfo:
                 if self.params not in self.history_params:
                     self.history_params.append(self.params)
             self.params = params
-        self.test_time = int(time.time())
+        if isinstance(self.test_time, int):
+            # обновляем только если test_time число
+            self.test_time = int(time.time())
 
     @staticmethod
     def _get_curl(url, proxy=None):
@@ -138,6 +146,24 @@ class DomainInfo:
 
         return c
 
+    @staticmethod
+    def _success(errno, errmsg):
+        # проверяет код возврата и сообщение об ошибке curl
+        if errno == 35:
+            # ошибка SSL/TLS
+            if 'unsupported protocol' in errmsg:
+                # unsupported protocol - соединение установлено,
+                # но сервер не поддерживае современные протоколы.
+                # считаем успехом
+                return True
+            # если alert decode error, alert handshake failure
+            # значит стратегия портит данные
+        if errno == 60:
+            # соединение установлено, но сервер использует
+            # устаревший сертификат безопасности. считаем успехом
+            return True
+        return False
+
     def _try_direct(self, url):
         # Проверка доступности без прокси
         debug(url)
@@ -163,7 +189,7 @@ class DomainInfo:
                 debug('ciadpi не запустился')
                 return False
 
-            c = _get_curl(target_url, f"socks5h://127.0.0.1:{port}")
+            c = self._get_curl(target_url, f"socks5h://127.0.0.1:{port}")
             c.perform()
             return True
         except pycurl.error as err:
@@ -172,24 +198,6 @@ class DomainInfo:
             proc.terminate()
             proc.wait()
             if 'c' in locals(): c.close()
-
-    @staticmethod
-    def _success(errno, errmsg):
-        # проверяет код возврата и сообщение об ошибке curl
-        if errno == 35:
-            # ошибка SSL/TLS
-            if 'unsupported protocol' in errmsg:
-                # unsupported protocol - соединение установлено,
-                # но сервер не поддерживае современные протоколы.
-                # считаем успехом
-                return True
-            # если alert decode error, alert handshake failure
-            # значит стратегия портит данные
-        if errno == 60:
-            # соединение установлено, но сервер использует
-            # устаревший сертификат безопасности. считаем успехом
-            return True
-        return False
 
     @staticmethod
     def find_working_params(target_url):
@@ -216,9 +224,12 @@ class DomainInfo:
                     debug('ciadpi не запустился')
                     return
 
-                c = DomainInfo._get_curl(target_url, f'socks5h://127.0.0.1:{port}')
-                multi.add_handle(c)
-                active_reqs[c] = {'proc': proc, 'params': params}
+                for _ in range(NUMBER_OF_TESTS):
+                    # проверяем стратегию несколько раз
+                    c = DomainInfo._get_curl(target_url,
+                                             f'socks5h://127.0.0.1:{port}')
+                    multi.add_handle(c)
+                    active_reqs[c] = {'proc': proc, 'params': params}
 
             except Exception as err:
                 debug(f'[Ex] {err}')
@@ -273,8 +284,10 @@ class DomainInfo:
             # Чистим всё при любом исходе
             for c, res in active_reqs.items():
                 try:
-                    res['proc'].terminate()
-                    res['proc'].wait(timeout=0.5)
+                    proc = res['proc']
+                    if proc.poll() is not None:
+                        proc.terminate()
+                        proc.wait() #timeout=0.5
                 except: pass
                 multi.remove_handle(c)
                 c.close()
@@ -289,6 +302,10 @@ class DomainInfo:
         if not self.status:
             debug('no status')
             return None
+        if not isinstance(self.test_time, int):
+            # не проверяем устаревание если test_time не число
+            assert(self.status == 'PROXY')
+            return self.params
         res = (time.time() - self.test_time) > self.TTL.get(self.status, 3600)
         if not res:
             if self.status in ('DIRECT', 'FAILED'):
@@ -298,7 +315,7 @@ class DomainInfo:
             return self.params
         return None
 
-    def run_test(self):
+    def run_test(self, url):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
         res = self._check_expired()
@@ -310,17 +327,15 @@ class DomainInfo:
             if res is not None: return res
 
             # Проверяем доступен ли ресурс напрямую
-            url = f'https://{self.domain}'
             info(f'[*] Проверка {self.domain} напрямую...')
-            for i in range(3):
-                #if test_url(url):
+            for _ in range(NUMBER_OF_TESTS):
                 if self._try_direct(url):
                     info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
                     self._update('DIRECT')
                     return 'DIRECT'
 
             # Подбор стратегии через ciadpi
-            info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}...')
+            info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
             # Проверяем историю (предыдущие рабочие параметры)
             # Сначала пробуем последний известный рабочий вариант
             configs_to_test = []
@@ -333,7 +348,7 @@ class DomainInfo:
                     configs_to_test.append(params)
 
             for params in configs_to_test:
-                if self._try_single_strategy(params, target_url):
+                if self._try_single_strategy(params, url):
                     self._update('PROXY', params)
                     return params
 
@@ -370,33 +385,47 @@ def get_domain_info(domain):
 
 def load_rules():
     debug('загрузка правил')
-    if os.path.exists(RULES_FILE): # FIXME
-        try:
-            with (open(RULES_FILE, 'r', encoding='utf-8') as f,
-                  open(DIRECT_FILE, 'r', encoding='utf-8') as d,
-                  open(FAILED_FILE, 'r', encoding='utf-8') as e):
-                for s in f:
-                    s = s.strip()
-                    if not s: continue
-                    domain, test_time, params = s.split(maxsplit=2)
-                    dom = DomainInfo(domain, 'PROXY', int(test_time), params)
-                    domain_registry[domain] = dom
-                for s in d:
-                    s = s.strip()
-                    if not s: continue
-                    domain, test_time = s.split(maxsplit=1)
-                    dom = DomainInfo(domain, 'DIRECT', int(test_time))
-                    domain_registry[domain] = dom
-                for s in e:
-                    s = s.strip()
-                    if not s: continue
-                    domain, test_time = s.split(maxsplit=1)
-                    dom = DomainInfo(domain, 'FAILED', int(test_time))
-                    domain_registry[domain] = dom
-        except Exception as err:
-            debug(f'[Ex] {err}')
-            pass
-        info(f'[*] Загружены правила для {len(domain_registry)} доменов')
+    if os.path.exists(RULES_FILE):
+        with open(RULES_FILE, encoding='utf-8') as f:
+            for s in f:
+                s = s.strip()
+                if not s: continue
+                domain, test_time, params = s.split(maxsplit=2)
+                dom = DomainInfo(domain, 'PROXY', int(test_time), params)
+                domain_registry[domain] = dom
+    if os.path.exists(DIRECT_FILE):
+        with open(DIRECT_FILE, encoding='utf-8') as f:
+            for s in f:
+                s = s.strip()
+                if not s: continue
+                domain, test_time = s.split(maxsplit=1)
+                dom = DomainInfo(domain, 'DIRECT', int(test_time))
+                domain_registry[domain] = dom
+    if os.path.exists(FAILED_FILE):
+        with open(FAILED_FILE, encoding='utf-8') as f:
+            for s in f:
+                s = s.strip()
+                if not s: continue
+                domain, test_time = s.split(maxsplit=1)
+                dom = DomainInfo(domain, 'FAILED', int(test_time))
+                domain_registry[domain] = dom
+    if os.path.exists(USER_RULES_FILE):
+        with open(USER_RULES_FILE, encoding='utf-8') as f:
+            n = 0
+            for s in f:
+                n += 1
+                s = s.split('#')[0]
+                s = s.strip()
+                if not s: continue
+                try:
+                    domain, params = s.split(maxsplit=1)
+                except Exception as err:
+                    error(f'{USER_RULES_FILE}: неправильный формат в строке {n}')
+                    continue
+                # вместо test_time используем строку, чтобы не проверялось на TTL
+                dom = DomainInfo(domain, 'PROXY', 'user', params)
+                domain_registry[domain] = dom
+    info(f'[*] Загружены правила для {len(domain_registry)} доменов')
 
 def save_rules():
     debug('сохранение правил')
@@ -428,7 +457,7 @@ def get_free_port():
 
 
 def ensure_ciadpi(port, params):
-    # проверяет запущен ли ciadpi, и если нет - запускаем
+    # проверяем запущен ли ciadpi, и если нет - запускаем
     debug(f'старт: port: {port}, params: {params}')
     if port in active_processes and active_processes[port].poll() is None:
         debug('ciadpi уже запущен')
@@ -462,7 +491,7 @@ def pipe(source, destination):
                 break
             destination.sendall(data)
     except Exception as err:
-        debug(f'[Ex] {err}')
+        #debug(f'[Ex] {err}')
         pass
     finally:
         # shutdown(SHUT_RD) гарантирует, что recv() во втором потоке 
@@ -470,7 +499,7 @@ def pipe(source, destination):
         try:
             destination.shutdown(socket.SHUT_WR)
         except Exception as err:
-            debug(f'[Ex] {err}')
+            #debug(f'[Ex] {err}')
             pass
 
 
@@ -507,7 +536,8 @@ def handle_client(client_socket):
                 return
 
         dom = get_domain_info(host)
-        params = dom.run_test() # получаем стратегию или DIRECT
+        url = f'{"https://" if is_https else "http://"}{host}/'
+        params = dom.run_test(url) # получаем стратегию или DIRECT
 
         # Подключение к серверу
         info(f'[>] Подключение: {host}:{port} '
@@ -559,7 +589,7 @@ def handle_client(client_socket):
                 s.shutdown(socket.SHUT_RDWR)
                 s.close()
             except Exception as err:
-                debug(f'[Ex] {err}')
+                #debug(f'[Ex] {err}')
                 pass
 
 def start_proxy():

@@ -6,7 +6,7 @@
 -f1+nme -t6 -a1
 -q1 -a1 -d1
 -o1 -a1 -d1
--d7 -s2 -a1 -o3 -a1
+-d7 -s2 -a1 -o3
 -o1 -s4 -s6 -a1
 -s1 -f-1 -S -a1
 -d6+s -q4+hm -o2 -a1
