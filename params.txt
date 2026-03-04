@@ -3,6 +3,7 @@
 -q1 -r25+s -a1
 -o1+s -d3+s -a1
 -s1+s -d3+s -a1
+n google.com -Qr -f-1 -r1+s -a1
 -f1+nme -t6 -a1
 -q1 -a1 -d1
 -o1 -a1 -d1

@@ -437,7 +437,8 @@ def save_rules():
             if dom.status == 'DIRECT':
                 print(f'{dom.domain} {dom.test_time}', file=d)
             elif dom.status == 'PROXY':
-                print(f'{dom.domain} {dom.test_time} {dom.params}', file=f)
+                if isinstance(dom.test_time, int):
+                    print(f'{dom.domain} {dom.test_time} {dom.params}', file=f)
             else:
                 print(f'{dom.domain} {dom.test_time}', file=e)
             if dom.history_params:
@@ -602,7 +603,10 @@ def start_proxy():
         return
     with open(STRATEGIES_FILE) as f:
         # добавляем из STRATEGIES_FILE
-        STRATEGIES = [line.strip() for line in f if line.strip()]
+        for s in f:
+            s = s.split('#')[0]
+            s = s.strip()
+            if s: STRATEGIES.append(s)
     info(f'[+] Загружено {len(STRATEGIES)} стратегий')
 
     load_rules()
