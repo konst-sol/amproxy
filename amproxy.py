@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys, os, time
+from pathlib import Path
 # для сети
 import socket
 import socks
@@ -66,7 +67,6 @@ class LevelFormatter(logging.Formatter):
 
 # --- Безопасное логирование ---
 log_queue = queue.Queue()
-
 def setup_logging():
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(LevelFormatter())
@@ -180,16 +180,10 @@ class DomainInfo:
     def _try_single_strategy(self, params, target_url, timeout=15):
         # Проверка одной конкретной стратегии
         port = get_free_port()
-        cmd = f'{CIADPI_EXE} -p {port} {params}'
         try:
-            proc = subprocess.Popen(cmd.split(),
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-            time.sleep(0.4) # Даем время прокси запуститься
-            if proc.poll() is not None:
-                debug('ciadpi не запустился')
+            proc = run_ciadpi(port, params)
+            if not proc:
                 return False
-
             c = self._get_curl(target_url, f"socks5h://127.0.0.1:{port}")
             c.perform()
             return True
@@ -200,8 +194,7 @@ class DomainInfo:
             proc.wait()
             if 'c' in locals(): c.close()
 
-    @staticmethod
-    def find_working_params(target_url):
+    def find_working_params(self, target_url):
         # Проверяет стратегии в несколько потоков и возвращает
         # первую успешную стратегию или None
         debug(f'target_url: {target_url}')
@@ -212,23 +205,13 @@ class DomainInfo:
 
         def start_worker(idx, params):
             port = get_free_port()
-            # Путь к ciadpi (предполагается в текущей папке)
-            cmd = f'{CIADPI_EXE} -p {port} {params}'
-
             try:
-                proc = subprocess.Popen(cmd.split(),
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL)
-                time.sleep(0.3) # Пауза, чтобы прокси успел поднять сокет
-                if proc.poll() is not None:
-                    # ciadpi завершился
-                    debug('ciadpi не запустился')
+                proc = run_ciadpi(port, params)
+                if not proc:
                     return
-
                 for _ in range(NUMBER_OF_TESTS):
                     # проверяем стратегию несколько раз
-                    c = DomainInfo._get_curl(target_url,
-                                             f'socks5h://127.0.0.1:{port}')
+                    c = self._get_curl(target_url, f'socks5h://127.0.0.1:{port}')
                     multi.add_handle(c)
                     active_reqs[c] = {'proc': proc, 'params': params}
 
@@ -271,6 +254,7 @@ class DomainInfo:
 
                         multi.remove_handle(c)
                         res['proc'].terminate()
+                        res['proc'].wait()
                         c.close()
 
                         if not final_params and pending_params:
@@ -465,30 +449,44 @@ def get_free_port():
         return port
 
 
+def run_ciadpi(port, params):
+    cmd = f'{CIADPI_EXE} -p {port} {params}'
+    proc = subprocess.Popen(cmd.split(),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    time.sleep(0.4) # Даем время прокси запуститься (открыть порт)
+    if proc.poll() is not None:
+        # ciadpi завершился
+        debug('ciadpi не запустился')
+        proc.terminate()
+        proc.wait()
+        return None
+    return proc
+
+
+ensure_ciadpi_lock = threading.Lock()
 def ensure_ciadpi(port, params):
     # проверяем запущен ли ciadpi, и если нет - запускаем
     debug(f'старт: port: {port}, params: {params}')
     if port in active_processes and active_processes[port].poll() is None:
         debug('ciadpi уже запущен')
         return True
-    cmd = f'{CIADPI_EXE} -p {port} {params}'
-    try:
-        debug(f'запускаем ciadpi: {cmd}')
-        proc = subprocess.Popen(cmd.split(),
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                                )
-        time.sleep(0.5) # полсекунды на открытие порта
-        if proc.poll() is not None:
-            # ciadpi завершился
-            debug('ciadpi не запустился')
-            return False
-        active_processes[port] = proc
-        return True
-    except Exception as err:
-        debug(f'[Ex] {err}')
-        pass
-    return False
+    with ensure_ciadpi_lock:
+        # double-check
+        if port in active_processes and active_processes[port].poll() is None:
+            debug('ciadpi уже запущен')
+            return True
+        try:
+            debug(f'запускаем ciadpi: -p {port} {params}')
+            proc = run_ciadpi(port, params)
+            if not proc:
+                return False
+            active_processes[port] = proc
+            return True
+        except Exception as err:
+            debug(f'[Ex] {err}')
+            pass
+        return False
 
 
 def pipe(source, destination):
@@ -639,7 +637,9 @@ def start_proxy():
         pass
     finally:
         server.close()
-        for p in active_processes.values(): p.terminate()
+        for p in active_processes.values():
+            p.terminate()
+            #p.wait()
         save_rules()
         listener.stop()
 
