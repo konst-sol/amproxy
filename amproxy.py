@@ -20,7 +20,6 @@ import queue
 HTTP_PROXY_PORT = 8888 # порт этой программы
 STRATEGIES_FILE = 'params.txt'
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else './ciadpi'
-CIADPI_EXE += ' -i 127.0.0.1'
 # Файлы для кэширования информации о проверках по одному домену на строке
 # в скобках - формат строки
 RULES_FILE = 'rules.txt' # стратегии (домен<пробел>время_проведения_теста<пробел>стратегия)
@@ -28,6 +27,8 @@ USER_RULES_FILE = 'user-rules.txt' # пользовательские страт
 DIRECT_FILE = 'direct.txt' # домены доступные напрямую (домен<пробел>время_проведения_теста)
 FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
 BACKUP_FILES = True # сохранять резервные копии файлов кэша (debug)
+# каталог для кэша
+CACHE_DIR = 'cache'
 TEST_TIMEOUT = 2 # таймаут для проверки доступности и поиска стратегии (секунды)
 TEST_CONNECTTIMEOUT = 2 # таймаут на установку соединения
 CHECK_TIMEOUT = 60 # таймаут для всего времени проверки (секунды)
@@ -95,7 +96,7 @@ class DomainInfo:
         'FAILED': FAILED_TTL*60*60
     }
 
-    def __init__(self, domain, status=None, test_time=0, params=None):
+    def __init__(self, domain, status=None, params=None, test_time=0, user_config=False):
         self.domain = domain
         self.status = status
         # если test_time число: время последней проверки (в секундах)
@@ -103,6 +104,7 @@ class DomainInfo:
         self.test_time = test_time
         self.params = params
         self.history_params = []  # Список стратегий, которые работали раньше
+        self.user_config = user_config # Стратегия задана пользователем
         self.lock = threading.Lock() # для проведения теста
 
     def _update(self, status, params=None):
@@ -114,8 +116,8 @@ class DomainInfo:
                 if self.params not in self.history_params:
                     self.history_params.append(self.params)
             self.params = params
-        if isinstance(self.test_time, int):
-            # обновляем только если test_time число
+        if not self.user_config:
+            # не обновляем если пользовательская стратегия
             self.test_time = int(time.time())
 
     @staticmethod
@@ -287,8 +289,8 @@ class DomainInfo:
         if not self.status:
             debug('no status')
             return None
-        if not isinstance(self.test_time, int):
-            # не проверяем устаревание если test_time не число
+        if self.user_config:
+            # не проверяем устаревание
             return self.params
         res = (time.time() - self.test_time) > self.TTL.get(self.status, 3600)
         if not res:
@@ -367,32 +369,24 @@ def get_domain_info(domain):
 
 # </DOMAININFO>
 
+def _load(fn, status, params=None):
+    if os.path.exists(fn):
+        with open(fn, encoding='utf-8') as f:
+            for s in f:
+                s = s.strip()
+                if not s: continue
+                if params is not None:
+                    domain, test_time, params = s.split(maxsplit=2)
+                else:
+                    domain, test_time = s.split(maxsplit=1)
+                dom = DomainInfo(domain, status, params, int(test_time))
+                domain_registry[domain] = dom
+
 def load_rules():
     debug('загрузка правил')
-    if os.path.exists(RULES_FILE):
-        with open(RULES_FILE, encoding='utf-8') as f:
-            for s in f:
-                s = s.strip()
-                if not s: continue
-                domain, test_time, params = s.split(maxsplit=2)
-                dom = DomainInfo(domain, 'PROXY', int(test_time), params)
-                domain_registry[domain] = dom
-    if os.path.exists(DIRECT_FILE):
-        with open(DIRECT_FILE, encoding='utf-8') as f:
-            for s in f:
-                s = s.strip()
-                if not s: continue
-                domain, test_time = s.split(maxsplit=1)
-                dom = DomainInfo(domain, 'DIRECT', int(test_time))
-                domain_registry[domain] = dom
-    if os.path.exists(FAILED_FILE):
-        with open(FAILED_FILE, encoding='utf-8') as f:
-            for s in f:
-                s = s.strip()
-                if not s: continue
-                domain, test_time = s.split(maxsplit=1)
-                dom = DomainInfo(domain, 'FAILED', int(test_time))
-                domain_registry[domain] = dom
+    _load(RULES_FILE, 'PROXY', True)
+    _load(DIRECT_FILE, 'DIRECT')
+    _load(FAILED_FILE, 'FAILED')
     if os.path.exists(USER_RULES_FILE):
         with open(USER_RULES_FILE, encoding='utf-8') as f:
             n = 0
@@ -408,7 +402,7 @@ def load_rules():
                     continue
                 # вместо test_time используем строку, чтобы не проверялось на TTL
                 if params == 'DIRECT':
-                    dom = DomainInfo(domain, 'DIRECT', 'user')
+                    dom = DomainInfo(domain, 'DIRECT', user_config=True)
                 else:
                     dom = DomainInfo(domain, 'PROXY', 'user', params)
                 domain_registry[domain] = dom
@@ -450,7 +444,7 @@ def get_free_port():
 
 
 def run_ciadpi(port, params):
-    cmd = f'{CIADPI_EXE} -p {port} {params}'
+    cmd = f'{CIADPI_EXE} -i 127.0.0.1 -p {port} {params}'
     proc = subprocess.Popen(cmd.split(),
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
