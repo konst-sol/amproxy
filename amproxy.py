@@ -2,11 +2,11 @@
 
 import sys, os, time
 from pathlib import Path
+from fnmatch import fnmatch
 # для сети
 import socket
 import socks
 import pycurl
-pycurl.global_init(pycurl.GLOBAL_ALL)
 import threading
 import subprocess
 from io import BytesIO
@@ -50,10 +50,7 @@ STRATEGIES = [] # список тестируемых стратегий
 # Служебные данные процессов
 param_to_port = {} # {params: port}
 active_processes = {} # {port: subprocess.Popen}
-# Глобальный реестр доменов
-domain_registry = {} # {domain: DomainInfo}
 # </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
-
 
 # <DEBUG>
 # Настройка вывода
@@ -106,7 +103,6 @@ def setup_logging(): #log_file_path, log_level=logging.INFO):
 
 
 # <DOMAININFO>
-
 class DomainInfo:
     TTL = {
         # время устаревания разных статусов
@@ -166,7 +162,6 @@ class DomainInfo:
         c.setopt(c.FORBID_REUSE, 1)
         if proxy:
             c.setopt(c.PROXY, proxy)
-
         return c
 
     @staticmethod
@@ -258,7 +253,6 @@ class DomainInfo:
 
                 while True:
                     queued, ok_list, err_list = multi.info_read()
-
                     # Если запрос прошел успешно
                     for c in ok_list:
                         res = active_reqs.pop(c)
@@ -307,7 +301,6 @@ class DomainInfo:
         # возвращает None если требуется проверка
         # в противном случае DIRECT или params
         if not self.status:
-            debug('no status')
             return None
         if self.user_config:
             # не проверяем устаревание
@@ -316,8 +309,7 @@ class DomainInfo:
         if not res:
             if self.status in ('DIRECT', 'FAILED'):
                 return 'DIRECT'
-            info(f'[!] Используем готовую стратегию для '
-                 f'{self.domain}: {self.params}')
+            info(f'[!] Используем стратегию для {self.domain}: {self.params}')
             return self.params
         return None
 
@@ -387,8 +379,68 @@ def get_domain_info(domain):
 
 # </DOMAININFO>
 
+# <DOMAINREGISTRY>
+
+class DomainRegistry:
+    def __init__(self):
+        self._auto_data = {}  # Программные домены
+        self._user_data = {}  # Пользовательские (в т.ч. с *)
+        self._wildcard_keys = set() # Быстрый доступ к списку масок
+
+    def __setitem__(self, key, value):
+        if value.user_config:
+            self._user_data[key] = value
+            if '*' in key:
+                self._wildcard_keys.add(key)
+        else:
+            self._auto_data[key] = value
+
+    def __getitem__(self, key):
+        # Точное совпадение в пользовательских стратегиях
+        if key in self._user_data:
+            return self._user_data[key]
+        # Поиск по wildcard в пользовательских стратегиях
+        for pattern in self._wildcard_keys:
+            if pattern.startswith('*.') and pattern[2:] == key:
+                return self._user_data[pattern]
+            if fnmatch(key, pattern):
+                return self._user_data[pattern]
+
+        # Точное совпадение в авто-доменах
+        if key in self._auto_data:
+            return self._auto_data[key]
+        raise KeyError(f"Домен '{key}' не найден")
+
+    def __contains__(self, key):
+        # Используем логику getitem, но возвращаем True/False
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
+
+    def __len__(self):
+        # Считаем уникальные ключи в обоих словарях
+        return len(set(self._auto_data) | set(self._user_data))
+
+    def values(self):
+        # Сначала значения авто, затем пользовательские (приоритетные)
+        # Объединяем так, чтобы не дублировать значения, если ключи совпали
+        combined = {**self._auto_data, **self._user_data}
+        return combined.values()
+
+    def __iter__(self):
+        # Позволяет делать "for key in ..."
+        combined_keys = set(self._auto_data) | set(self._user_data)
+        return iter(combined_keys)
+
+# Глобальный реестр доменов
+domain_registry = DomainRegistry() # {domain: DomainInfo}
+
+# <DOMAINREGISTRY/>
 
 # <LOAD_RULES/SAVE_RULES>
+
 # переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
 RULES_FILE = CACHE_DIR / RULES_FILE
@@ -426,7 +478,7 @@ def load_rules():
     _load(RULES_FILE, 'PROXY', True)
     _load(DIRECT_FILE, 'DIRECT')
     _load(FAILED_FILE, 'FAILED')
-    #_load(USER_RULES_FILE, 'USER')
+    _load(USER_RULES_FILE, 'USER')
     info(f'[*] Загружены правила для {len(domain_registry)} доменов')
 
 
@@ -474,7 +526,7 @@ def run_ciadpi(port, params):
     proc = subprocess.Popen(cmd.split(),
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
-    time.sleep(0.4) # Даем время прокси запуститься (открыть порт)
+    time.sleep(0.4) # Даем время ciadpi запуститься (открыть порт)
     if proc.poll() is not None:
         # ciadpi завершился
         debug('ciadpi не запустился')
@@ -487,7 +539,6 @@ def run_ciadpi(port, params):
 ensure_ciadpi_lock = threading.Lock()
 def ensure_ciadpi(port, params):
     # проверяем запущен ли ciadpi, и если нет - запускаем
-    debug(f'старт: port: {port}, params: {params}')
     if port in active_processes and active_processes[port].poll() is None:
         debug('ciadpi уже запущен')
         return True
@@ -535,6 +586,7 @@ def handle_client(client_socket):
     remote_socket = None
     try:
         client_socket.settimeout(60)
+        request = None
         try: request = client_socket.recv(8192)
         except: pass
         if not request:
@@ -663,8 +715,9 @@ def start_proxy():
         save_rules()
         listener.stop()
 
-
 #
-start_proxy()
-pycurl.global_cleanup()
+if __name__ == "__main__":
+    pycurl.global_init(pycurl.GLOBAL_ALL)
+    start_proxy()
+    pycurl.global_cleanup()
 #
