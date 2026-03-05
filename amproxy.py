@@ -96,7 +96,8 @@ class DomainInfo:
         'FAILED': FAILED_TTL*60*60
     }
 
-    def __init__(self, domain, status=None, params=None, test_time=0, user_config=False):
+    def __init__(self, domain, status=None, params=None,
+                 test_time=0, user_config=False):
         self.domain = domain
         self.status = status
         # если test_time число: время последней проверки (в секундах)
@@ -369,17 +370,29 @@ def get_domain_info(domain):
 
 # </DOMAININFO>
 
-def _load(fn, status, params=None):
-    if os.path.exists(fn):
-        with open(fn, encoding='utf-8') as f:
+def _load(filename, status, rules=False):
+    if os.path.exists(filename):
+        with open(filename, encoding='utf-8') as f:
             for s in f:
+                s = s.split('#')[0] # убираем комментарии
                 s = s.strip()
                 if not s: continue
-                if params is not None:
+                if rules:
+                    # RULES_FILE
                     domain, test_time, params = s.split(maxsplit=2)
+                    dom = DomainInfo(domain, status, params, int(test_time))
+                elif status == 'USER':
+                    # USER_RULES_FILE
+                    domain, params = s.split(maxsplit=1)
+                    if params == 'DIRECT':
+                        dom = DomainInfo(domain, 'DIRECT', user_config=True)
+                    else:
+                        dom = DomainInfo(domain, 'PROXY', params,
+                                         user_config=True)
                 else:
+                    # DIRECT_FILE и FAILED_FILE
                     domain, test_time = s.split(maxsplit=1)
-                dom = DomainInfo(domain, status, params, int(test_time))
+                    dom = DomainInfo(domain, status, test_time=int(test_time))
                 domain_registry[domain] = dom
 
 def load_rules():
@@ -387,25 +400,7 @@ def load_rules():
     _load(RULES_FILE, 'PROXY', True)
     _load(DIRECT_FILE, 'DIRECT')
     _load(FAILED_FILE, 'FAILED')
-    if os.path.exists(USER_RULES_FILE):
-        with open(USER_RULES_FILE, encoding='utf-8') as f:
-            n = 0
-            for s in f:
-                n += 1
-                s = s.split('#')[0]
-                s = s.strip()
-                if not s: continue
-                try:
-                    domain, params = s.split(maxsplit=1)
-                except Exception as err:
-                    error(f'{USER_RULES_FILE}: неправильный формат в строке {n}')
-                    continue
-                # вместо test_time используем строку, чтобы не проверялось на TTL
-                if params == 'DIRECT':
-                    dom = DomainInfo(domain, 'DIRECT', user_config=True)
-                else:
-                    dom = DomainInfo(domain, 'PROXY', params, user_config=True)
-                domain_registry[domain] = dom
+    _load(USER_RULES_FILE, 'USER')
     info(f'[*] Загружены правила для {len(domain_registry)} доменов')
 
 def save_rules():
@@ -634,7 +629,7 @@ def start_proxy():
         for p in active_processes.values():
             p.terminate()
             #p.wait()
-        save_rules()
+        #save_rules()
         listener.stop()
 
 
