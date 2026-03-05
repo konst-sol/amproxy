@@ -404,7 +404,7 @@ def load_rules():
                 if params == 'DIRECT':
                     dom = DomainInfo(domain, 'DIRECT', user_config=True)
                 else:
-                    dom = DomainInfo(domain, 'PROXY', 'user', params)
+                    dom = DomainInfo(domain, 'PROXY', params, user_config=True)
                 domain_registry[domain] = dom
     info(f'[*] Загружены правила для {len(domain_registry)} доменов')
 
