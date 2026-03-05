@@ -216,13 +216,13 @@ class DomainInfo:
             proc.wait()
             if 'c' in locals(): c.close()
 
-    def find_working_params(self, target_url):
+    def find_working_params(self, target_url, strats):
         # Проверяет стратегии в несколько потоков и возвращает
         # первую успешную стратегию или None
         debug(f'target_url: {target_url}')
         multi = pycurl.CurlMulti()
         active_reqs = {}  # {curl_handle: {'proc': popen_obj, 'params': str}}
-        pending_params = list(enumerate(STRATEGIES))
+        pending_params = list(enumerate(strats))
         final_params = None
 
         def start_worker(idx, params):
@@ -344,39 +344,37 @@ class DomainInfo:
             info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
             # Проверяем историю (предыдущие рабочие параметры)
             # Сначала пробуем последний известный рабочий вариант
-            configs_to_test = []
+            pre_strats = []
             if self.params:
-                configs_to_test.append(self.params)
-
+                pre_strats.append(self.params)
             # Добавляем остальные из истории (уникальные)
             for params in self.history_params:
-                if params not in configs_to_test:
-                    configs_to_test.append(params)
-
-            for params in configs_to_test:
+                if params not in pre_strats:
+                    pre_strats.append(params)
+            # Добавляем работающие стратегии
+            for dom in domain_registry.values():
+                if dom.params not in pre_strats:
+                    pre_strats.append(dom.params)
+            debug(f'Предварительная проверка {len(pre_strats)} стратегий')
+            # предварительная проверка
+            for params in pre_strats:
                 if self._try_single_strategy(params, url):
                     self._update('PROXY', params)
                     return params
-
             # Если история не помогла — запускаем многопоточный поиск
-            # по всем STRATEGIES
-            params = self.find_working_params(url)
+            # по всем остальным STRATEGIES
+            remaining_starts = []
+            for params in STRATEGIES:
+                if params not in pre_strats:
+                    remaining_starts.append(params)
+            debug(f'Проверка остальных {len(remaining_starts)} стратегий')
+            params = self.find_working_params(url, remaining_starts)
             if params:
                 self._update('PROXY', params)
                 return params
             # подбор параметров закончился неудачей - соединяем напрямую
             self._update('FAILED')
             return 'DIRECT'
-
-
-    # Методы для JSON
-    def to_dict(self):
-        return {
-            'status': self.status,
-            'params': self.params,
-            'history_params': self.history_params,
-            'test_time': self.test_time
-        }
 
 
 registry_lock = threading.Lock()
