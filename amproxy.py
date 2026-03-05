@@ -370,9 +370,16 @@ def get_domain_info(domain):
 
 # </DOMAININFO>
 
+# переназначаем имена файлов в объекты Path
+CACHE_DIR = Path(CACHE_DIR)
+RULES_FILE = CACHE_DIR / RULES_FILE
+USER_RULES_FILE = CACHE_DIR / USER_RULES_FILE
+DIRECT_FILE = CACHE_DIR / DIRECT_FILE
+FAILED_FILE = CACHE_DIR / FAILED_FILE
+
 def _load(filename, status, rules=False):
-    if os.path.exists(filename):
-        with open(filename, encoding='utf-8') as f:
+    if filename.is_file(): # проверяем существование файла
+        with filename.open(encoding='utf-8') as f:
             for s in f:
                 s = s.split('#')[0] # убираем комментарии
                 s = s.strip()
@@ -387,8 +394,7 @@ def _load(filename, status, rules=False):
                     if params == 'DIRECT':
                         dom = DomainInfo(domain, 'DIRECT', user_config=True)
                     else:
-                        dom = DomainInfo(domain, 'PROXY', params,
-                                         user_config=True)
+                        dom = DomainInfo(domain, 'PROXY', params, user_config=True)
                 else:
                     # DIRECT_FILE и FAILED_FILE
                     domain, test_time = s.split(maxsplit=1)
@@ -400,30 +406,34 @@ def load_rules():
     _load(RULES_FILE, 'PROXY', True)
     _load(DIRECT_FILE, 'DIRECT')
     _load(FAILED_FILE, 'FAILED')
-    _load(USER_RULES_FILE, 'USER')
+    #_load(USER_RULES_FILE, 'USER')
     info(f'[*] Загружены правила для {len(domain_registry)} доменов')
+
 
 def save_rules():
     debug('сохранение правил')
+    # Создаем CACHE_DIR, если его еще нет
+    RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
     if BACKUP_FILES:
-        os.replace(RULES_FILE, RULES_FILE+'.bak')
-        os.replace(DIRECT_FILE, DIRECT_FILE+'.bak')
-        os.replace(FAILED_FILE, FAILED_FILE+'.bak')
-    with (open(RULES_FILE, 'w', encoding='utf-8') as f,
-          open(DIRECT_FILE, 'w', encoding='utf-8') as d,
-          open(FAILED_FILE, 'w', encoding='utf-8') as e,
-          open('saved.txt', 'w', encoding='utf-8') as s):
+        for fn in (RULES_FILE, DIRECT_FILE, FAILED_FILE):
+            if fn.exists():
+                # Создаем резервную копию
+                # .with_suffix добавит/заменит расширение
+                bak_file = fn.with_suffix(fn.suffix + '.bak')
+                fn.replace(bak_file)
+    # Записываем данные
+    with (RULES_FILE.open('w', encoding='utf-8') as f,
+          DIRECT_FILE.open('w', encoding='utf-8') as d,
+          FAILED_FILE.open('w', encoding='utf-8') as e):
         for dom in domain_registry.values():
-            if dom.status == 'DIRECT':
-                print(f'{dom.domain} {dom.test_time}', file=d)
-            elif dom.status == 'PROXY':
-                if isinstance(dom.test_time, int):
+            if dom.status == 'PROXY':
+                if not dom.user_config:
                     # игнорируем пользовательские стратегии
                     print(f'{dom.domain} {dom.test_time} {dom.params}', file=f)
-            else:
+            elif dom.status == 'DIRECT':
+                print(f'{dom.domain} {dom.test_time}', file=d)
+            else: # FAILED
                 print(f'{dom.domain} {dom.test_time}', file=e)
-            if dom.history_params:
-                print(f'{dom.domain} {"|".join(dom.history_params)}', file=s)
 
 
 def get_free_port():
@@ -629,7 +639,7 @@ def start_proxy():
         for p in active_processes.values():
             p.terminate()
             #p.wait()
-        #save_rules()
+        save_rules()
         listener.stop()
 
 
