@@ -48,7 +48,7 @@ LOG_FILE = sys.argv[0].split('.')[0]+'.log'
 # <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 STRATEGIES = [] # список тестируемых стратегий
 # Служебные данные процессов
-param_to_port = {} # {params: port}
+params_to_port = {} # {params: port}
 active_processes = {} # {port: subprocess.Popen}
 # </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 
@@ -102,7 +102,7 @@ def setup_logging(): #log_file_path, log_level=logging.INFO):
 
     return listener
 
-# Вывод статуса ciadpi по Ctrl+Break / kill -USR1 PID
+# Вывод статуса ciadpi и summary по Ctrl+Break / kill -USR1 PID
 def print_status(signum, frame):
     # Функция-обработчик сигнала для вывода статуса
     print('\n' + '='*50)
@@ -114,16 +114,17 @@ def print_status(signum, frame):
     else:
         print(f'{'PORT':<8} | {'PID':<8} | {'PARAMS'}')
         print('-' * 50)
-        # Собираем данные из словарей param_to_port и active_processes
+        # Собираем данные из словарей params_to_port и active_processes
         # Для удобства создадим обратный маппинг портов в параметры
-        port_to_param = {v: k for k, v in param_to_port.items()}
+        port_to_params = {v: k for k, v in params_to_port.items()}
         for port, proc in active_processes.items():
             pid = proc.pid
-            params = port_to_param.get(port, 'неизвестно')
+            params = port_to_params.get(port, 'неизвестно')
             # Проверяем, живой ли процесс на самом деле
             status = 'LIVE' if proc.poll() is None else 'DEAD'
             print(f'{port:<8} | {pid:<8} | {params} [{status}]')
     print('='*50 + '\n')
+    print(get_summary())
 
 # Регистрация обработчика
 def regsig():
@@ -133,6 +134,38 @@ def regsig():
     else:
         # В Linux/macOS используем SIGUSR1 (kill -USR1 PID)
         signal.signal(signal.SIGUSR1, print_status)
+
+# summary
+summary = {
+    'DIRECT': [],
+    'PROXY':  [],
+    'FAILED': [],
+    'UPDATE': [],
+    }
+summary_lock = threading.Lock()
+def update_summary(status, domain):
+    with summary_lock:
+        summary[status].append(domain)
+def get_summary():
+    out = ['Результаты за этот сеанс']
+    for s in summary:
+        if summary[s]:
+            if s == 'UPDATE':
+                out.append('Обновлены:')
+                out += [f'  {i}' for i in summary[s]]
+            elif s == 'PROXY':
+                out.append('В категорию PROXY добавлены:')
+                for d in summary[s]:
+                    dom = domain_registry.get(d)
+                    if dom:
+                        out.append(f'  {d} ({dom.params})')
+                    else:
+                        out.append(f'  {d} (не зарегистрирован)')
+            else:
+                out.append(f'В категорию {s} добавлены:')
+                out += [f'  {i}' for i in summary[s]]
+    out.append('\n')
+    return '\n'.join(out)
 
 # </DEBUG>
 
@@ -160,6 +193,11 @@ class DomainInfo:
 
     def _update(self, status, params=None):
         # обновляем status, params и test_time
+        if self.status is None:
+            # новый статус
+            update_summary(status, self.domain)
+        else:
+            update_summary('UPDATE', self.domain)
         self.status = status
         if params:
             # Если это новая стратегия, сохраняем старую в историю
@@ -384,10 +422,16 @@ class DomainInfo:
                     pre_strats.append(dom.params)
             debug(f'Предварительная проверка {len(pre_strats)} стратегий')
             # предварительная проверка
-            for params in pre_strats:
-                if self._try_single_strategy(params, url):
-                    self._update('PROXY', params)
-                    return params
+            # проверка в несколько потоков
+            params = self.find_working_params(url, pre_strats)
+            if params:
+                self._update('PROXY', params)
+                return params
+            # проверка в один поток
+            # for params in pre_strats:
+            #     if self._try_single_strategy(params, url):
+            #         self._update('PROXY', params)
+            #         return params
             # Если история не помогла — запускаем многопоточный поиск
             # по всем остальным STRATEGIES
             remaining_starts = []
@@ -544,6 +588,14 @@ def save_rules():
 
 # <LOAD_RULES/SAVE_RULES/>
 
+params_to_port_lock = threading.Lock()
+def get_params_to_port(params):
+    # Безопасно извлекает или создает запись в params_to_port
+    with registry_lock:
+        if params not in params_to_port:
+            params_to_port[params] = get_free_port()
+        return params_to_port[params]
+
 
 def get_free_port():
     # запрашиваем свободный порт и возвращаем его
@@ -666,10 +718,7 @@ def handle_client(client_socket):
             pass
         else:
             # определяем порт ciadpi
-            target_port = param_to_port.get(params)
-            if not target_port:
-                target_port = param_to_port[params] = get_free_port()
-                # ciadpi еще не запущен
+            target_port = get_params_to_port(params)
             # запуск ciadpi
             if not ensure_ciadpi(target_port, params):
                 error('ensure_ciadpi вернул False')
@@ -751,6 +800,7 @@ def start_proxy():
             #p.wait()
         save_rules()
         listener.stop()
+        #print(get_summary())
 
 #
 if __name__ == "__main__":
