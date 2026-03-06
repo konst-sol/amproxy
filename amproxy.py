@@ -11,10 +11,10 @@ import threading
 import subprocess
 from io import BytesIO
 # для логирования
-import traceback
 import logging, logging.handlers
 from logging import debug, info, error
 import queue
+import signal
 
 # <НАСТРОЙКИ>
 HTTP_PROXY_HOST = '127.0.0.1'
@@ -33,7 +33,7 @@ CACHE_DIR = 'cache'
 TEST_TIMEOUT = 2 # таймаут для проверки доступности и поиска стратегии (секунды)
 TEST_CONNECTTIMEOUT = 2 # таймаут на установку соединения
 CHECK_TIMEOUT = 60 # таймаут для всего времени проверки (секунды)
-CURL_THREAD_LIMIT = 5 # сколько потоков использовать для проверки стратегий
+CURL_THREAD_LIMIT = 8 # сколько потоков использовать для проверки стратегий
 NUMBER_OF_TESTS = 3 # количество проверок прямой доступности и каждой стратегии
 # время устаревания разных статусов в часах:
 DIRECT_TTL = 7*24 # прямое подключение
@@ -96,8 +96,43 @@ def setup_logging(): #log_file_path, log_level=logging.INFO):
     logger = logging.getLogger()
     logger.setLevel(LOG_LEVEL)
     logger.addHandler(logging.handlers.QueueHandler(log_queue))
+    # вывод exception
+    global print_exc
+    print_exc = logger.exception
 
     return listener
+
+# Вывод статуса ciadpi по Ctrl+Break / kill -USR1 PID
+def print_status(signum, frame):
+    # Функция-обработчик сигнала для вывода статуса
+    print('\n' + '='*50)
+    print(' СТАТУС ЗАРЕГИСТРИРОВАННЫХ ПРОЦЕССОВ ciadpi')
+    print('='*50)
+
+    if not active_processes:
+        print(' Активных процессов ciadpi нет.')
+    else:
+        print(f'{'PORT':<8} | {'PID':<8} | {'PARAMS'}')
+        print('-' * 50)
+        # Собираем данные из словарей param_to_port и active_processes
+        # Для удобства создадим обратный маппинг портов в параметры
+        port_to_param = {v: k for k, v in param_to_port.items()}
+        for port, proc in active_processes.items():
+            pid = proc.pid
+            params = port_to_param.get(port, 'неизвестно')
+            # Проверяем, живой ли процесс на самом деле
+            status = 'LIVE' if proc.poll() is None else 'DEAD'
+            print(f'{port:<8} | {pid:<8} | {params} [{status}]')
+    print('='*50 + '\n')
+
+# Регистрация обработчика
+def regsig():
+    if sys.platform == 'win32':
+        # В Windows SIGUSR1 нет, используем SIGBREAK (Ctrl+Break)
+        signal.signal(signal.SIGBREAK, print_status)
+    else:
+        # В Linux/macOS используем SIGUSR1 (kill -USR1 PID)
+        signal.signal(signal.SIGUSR1, print_status)
 
 # </DEBUG>
 
@@ -509,6 +544,7 @@ def save_rules():
 
 # <LOAD_RULES/SAVE_RULES/>
 
+
 def get_free_port():
     # запрашиваем свободный порт и возвращаем его
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -660,7 +696,7 @@ def handle_client(client_socket):
 
     except Exception as err:
         error(f"Error handling client: {err}")
-        traceback.print_exc()
+        print_exc()
     finally:
         # Важно закрыть оба сокета, чтобы освободить дескрипторы
         for s in [client_socket, remote_socket]:
@@ -676,7 +712,7 @@ def start_proxy():
     listener = setup_logging()
 
     global STRATEGIES
-    debug(f'{sys.argv[0]} стартовал {time.strftime("%d.%m.%Y %H:%M")}')
+    debug(f'старт {time.strftime("%d.%m.%Y %H:%M")} (PID:  {os.getpid()})')
     if not os.path.exists(STRATEGIES_FILE):
         info(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
         return
@@ -694,6 +730,7 @@ def start_proxy():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HTTP_PROXY_HOST, HTTP_PROXY_PORT))
     server.listen(128)
+    regsig() # регистрация SIGUSR1 / SIGBREAK
     info(f'[*] Прокси готов на порту {HTTP_PROXY_PORT}')
 
     try:
