@@ -102,9 +102,25 @@ def setup_logging(): #log_file_path, log_level=logging.INFO):
 
     return listener
 
-# Вывод статуса ciadpi и summary по Ctrl+Break / kill -USR1 PID
+# Вывод статуса ciadpi, статистики использования стратегий
+# и добавления доменов в кэш
+# по Ctrl+Break / kill -USR1 <PID>
 def print_status(signum, frame):
-    # Функция-обработчик сигнала для вывода статуса
+    # Функция-обработчик сигнала для вывода информации
+    print_ciadpi_status()
+    print_params_stat()
+    print_summary()
+
+# Регистрация обработчика
+def regsig():
+    if sys.platform == 'win32':
+        # В Windows SIGUSR1 нет, используем SIGBREAK (Ctrl+Break)
+        signal.signal(signal.SIGBREAK, print_status)
+    else:
+        # В Linux/macOS используем SIGUSR1 (kill -USR1 PID)
+        signal.signal(signal.SIGUSR1, print_status)
+
+def print_ciadpi_status():
     print('\n' + '='*50)
     print(' СТАТУС ЗАРЕГИСТРИРОВАННЫХ ПРОЦЕССОВ ciadpi')
     print('='*50)
@@ -124,16 +140,26 @@ def print_status(signum, frame):
             status = 'LIVE' if proc.poll() is None else 'DEAD'
             print(f'{port:<8} | {pid:<8} | {params} [{status}]')
     print('='*50 + '\n')
-    print(get_summary())
+    print_params_stat()
+    print_summary()
 
-# Регистрация обработчика
-def regsig():
-    if sys.platform == 'win32':
-        # В Windows SIGUSR1 нет, используем SIGBREAK (Ctrl+Break)
-        signal.signal(signal.SIGBREAK, print_status)
-    else:
-        # В Linux/macOS используем SIGUSR1 (kill -USR1 PID)
-        signal.signal(signal.SIGUSR1, print_status)
+def print_params_stat():
+    print('='*50)
+    print('СТАТИСТИКА ИСПОЛЬЗОВАНИЯ СТРАТЕГИЙ')
+    print('='*50)
+    stat = {}
+    for domain in domain_registry:
+        dom = domain_registry[domain]
+        if dom.params is None: continue
+        if dom.params in stat:
+            stat[dom.params] += 1
+        else:
+            stat[dom.params] = 1
+    print(f'{'NUM':<3} | {'PARAMS'}')
+    print('-' * 50)
+    for d, n in sorted(stat.items(), key=lambda item: item[1]): # reverse=True
+        print(f'{n:<3} | {d}')
+    print('='*50+'\n')
 
 # summary
 summary = {
@@ -146,31 +172,32 @@ summary_lock = threading.Lock()
 def update_summary(status, domain):
     with summary_lock:
         summary[status].append(domain)
-def get_summary():
-    out = ['Результаты за этот сеанс']
+def print_summary():
+    print('='*50)
+    print('ДОБАВЛЕНЫ ДОМЕНЫ ЗА ЭТОТ СЕАНС')
+    print('='*50)
     for s in summary:
         if summary[s]:
             if s == 'UPDATE':
-                out.append('Обновлены:')
+                print('Обновлены:')
                 out += [f'  {i}' for i in summary[s]]
             elif s == 'PROXY':
-                out.append('В категорию PROXY добавлены:')
+                print('В категорию PROXY добавлены:')
                 for d in summary[s]:
-                    dom = domain_registry.get(d)
+                    dom = domain_registry[d]
                     if dom:
-                        out.append(f'  {d} ({dom.params})')
+                        print(f'  {d} ({dom.params})')
                     else:
-                        out.append(f'  {d} (не зарегистрирован)')
+                        print(f'  {d} (не зарегистрирован)')
             else:
-                out.append(f'В категорию {s} добавлены:')
+                print(f'В категорию {s} добавлены:')
                 out += [f'  {i}' for i in summary[s]]
-    out.append('\n')
-    return '\n'.join(out)
+    print('\n')
 
 # </DEBUG>
 
-
 # <DOMAININFO>
+
 class DomainInfo:
     TTL = {
         # время устаревания разных статусов
@@ -529,28 +556,29 @@ DIRECT_FILE = CACHE_DIR / DIRECT_FILE
 FAILED_FILE = CACHE_DIR / FAILED_FILE
 
 def _load(filename, status, rules=False):
-    if filename.is_file(): # проверяем существование файла
-        with filename.open(encoding='utf-8') as f:
-            for s in f:
-                s = s.split('#')[0] # убираем комментарии
-                s = s.strip()
-                if not s: continue
-                if rules:
-                    # RULES_FILE
-                    domain, test_time, params = s.split(maxsplit=2)
-                    dom = DomainInfo(domain, status, params, int(test_time))
-                elif status == 'USER':
-                    # USER_RULES_FILE
-                    domain, params = s.split(maxsplit=1)
-                    if params == 'DIRECT':
-                        dom = DomainInfo(domain, 'DIRECT', user_config=True)
-                    else:
-                        dom = DomainInfo(domain, 'PROXY', params, user_config=True)
+    if not filename.is_file(): # проверяем существование файла
+        return
+    with filename.open(encoding='utf-8') as f:
+        for s in f:
+            s = s.split('#')[0] # убираем комментарии
+            s = s.strip()
+            if not s: continue
+            if rules:
+                # RULES_FILE
+                domain, test_time, params = s.split(maxsplit=2)
+                dom = DomainInfo(domain, status, params, int(test_time))
+            elif status == 'USER':
+                # USER_RULES_FILE
+                domain, params = s.split(maxsplit=1)
+                if params == 'DIRECT':
+                    dom = DomainInfo(domain, 'DIRECT', user_config=True)
                 else:
-                    # DIRECT_FILE и FAILED_FILE
-                    domain, test_time = s.split(maxsplit=1)
-                    dom = DomainInfo(domain, status, test_time=int(test_time))
-                domain_registry[domain] = dom
+                    dom = DomainInfo(domain, 'PROXY', params, user_config=True)
+            else:
+                # DIRECT_FILE и FAILED_FILE
+                domain, test_time = s.split(maxsplit=1)
+                dom = DomainInfo(domain, status, test_time=int(test_time))
+            domain_registry[domain] = dom
 
 def load_rules():
     debug('загрузка правил')
@@ -800,7 +828,7 @@ def start_proxy():
             #p.wait()
         save_rules()
         listener.stop()
-        #print(get_summary())
+        #print_summary()
 
 #
 if __name__ == "__main__":
