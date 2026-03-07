@@ -30,8 +30,8 @@ FAILED_FILE = 'failed.txt' # домены для которых стратеги
 BACKUP_FILES = True # сохранять резервные копии файлов кэша (debug)
 # каталог для кэша
 CACHE_DIR = 'cache'
-TEST_TIMEOUT = 2 # таймаут для проверки доступности и поиска стратегии (секунды)
-TEST_CONNECTTIMEOUT = 2 # таймаут на установку соединения
+DIRECT_TEST_TIMEOUT = 3 # таймаут для проверки доступности (секунды)
+PROXY_TEST_TIMEOUT = 2 # таймаут для поиска стратегии
 #CHECK_TIMEOUT = 60 # таймаут для всего времени проверки (секунды)
 CURL_THREAD_LIMIT = 8 # сколько потоков использовать для проверки стратегий
 NUMBER_OF_TESTS = 3 # количество проверок прямой доступности и каждой стратегии
@@ -181,7 +181,7 @@ def print_summary():
         if summary[s]:
             if s == 'UPDATE':
                 info('Обновлены:')
-                info(''.join(f'  {i}\n' for i in summary[s]), end='')
+                info('\n'.join(f'  {i}' for i in summary[s]))
             elif s == 'PROXY':
                 info('В категорию PROXY добавлены:')
                 for d in summary[s]:
@@ -192,7 +192,7 @@ def print_summary():
                         info(f'  {d} (не зарегистрирован)')
             else:
                 info(f'В категорию {s} добавлены:')
-                info(''.join(f'  {i}\n' for i in summary[s]), end='')
+                info('\n'.join(f'  {i}' for i in summary[s]))
     info('\n')
 
 # </DEBUG>
@@ -239,18 +239,22 @@ class DomainInfo:
         # Настройка curl
         c = pycurl.Curl()
         c.setopt(c.URL, url)
-        # Используем setopt(c.WRITEDATA, buffer) потому что
-        # с (c.WRITEFUNCTION, lambda x: None) для каждого пришедшего
-        # пакета данных (chunk) libcurl вызывает интерпретатор Python,
-        # чтобы выполнить lambda
-        buffer = BytesIO()
-        c.setopt(c.WRITEDATA, buffer)
         # Переход по редиректам, так как многие сайты при проверке
         # доступности могут перенаправлять с http на https
         c.setopt(c.FOLLOWLOCATION, True)
-        # Таймауты
-        c.setopt(c.CONNECTTIMEOUT, TEST_CONNECTTIMEOUT)
-        c.setopt(c.TIMEOUT, TEST_TIMEOUT)
+        if proxy:
+            # Используем setopt(c.WRITEDATA, buffer) потому что
+            # с (c.WRITEFUNCTION, lambda x: None) для каждого пришедшего
+            # пакета данных (chunk) libcurl вызывает интерпретатор Python,
+            # чтобы выполнить lambda
+            buffer = BytesIO()
+            c.setopt(c.WRITEDATA, buffer)
+            # Таймаут
+            c.setopt(c.TIMEOUT, PROXY_TEST_TIMEOUT)
+        else:
+            # для проверки доступности используем метод HEAD (без тела)
+            c.setopt(c.NOBODY, True)
+            c.setopt(c.TIMEOUT, DIRECT_TEST_TIMEOUT)
         # Важная опция при работе в многопоточных средах
         # или при быстром создании/удалении хендлов.
         # Предотвращает падения из-за системных сигналов таймера
@@ -270,7 +274,7 @@ class DomainInfo:
             # ошибка SSL/TLS
             if 'unsupported protocol' in errmsg:
                 # unsupported protocol - соединение установлено,
-                # но сервер не поддерживае современные протоколы.
+                # но сервер не поддерживает современные протоколы.
                 # считаем успехом
                 return True
             # если alert decode error, alert handshake failure
@@ -281,34 +285,29 @@ class DomainInfo:
             return True
         return False
 
-    def _try_direct(self, url):
-        # Проверка доступности без прокси
-        debug(url)
-        c = self._get_curl(url)
-        try:
-            c.perform()
-            return True
-        except pycurl.error as err:
-            return self._success(*err.args)
-        finally:
-            c.close()
-
-    def _try_single_strategy(self, params, target_url, timeout=15):
-        # Проверка одной конкретной стратегии
-        port = get_free_port()
-        try:
+    def _try_http_connect(self, target_url, params=None):
+        debug(f'{target_url} [{params}]')
+        proc = None
+        if params:
+            # Проверка одной конкретной стратегии
+            port = get_free_port()
             proc = run_ciadpi(port, params)
             if not proc:
                 return False
             c = self._get_curl(target_url, f"socks5h://127.0.0.1:{port}")
+        else:
+            # Проверка доступности без прокси
+            c = self._get_curl(target_url)
+        try:
             c.perform()
             return True
         except pycurl.error as err:
             return self._success(*err.args)
         finally:
-            proc.terminate()
-            proc.wait()
-            if 'c' in locals(): c.close()
+            if proc:
+                proc.terminate()
+                proc.wait()
+            c.close()
 
     def find_working_params(self, target_url, strats):
         # Проверяет стратегии в несколько потоков и возвращает
@@ -368,6 +367,7 @@ class DomainInfo:
                             break
 
                         multi.remove_handle(c)
+                        #if res['proc'].poll() is not None:
                         res['proc'].terminate()
                         res['proc'].wait()
                         c.close()
@@ -426,7 +426,7 @@ class DomainInfo:
             # Проверяем доступен ли ресурс напрямую
             info(f'[*] Проверка {self.domain} напрямую...')
             for _ in range(NUMBER_OF_TESTS):
-                if self._try_direct(url):
+                if self._try_http_connect(url):
                     info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
                     self._update('DIRECT')
                     return 'DIRECT'
@@ -455,7 +455,7 @@ class DomainInfo:
                 return params
             # проверка в один поток
             # for params in pre_strats:
-            #     if self._try_single_strategy(params, url):
+            #     if self._try_http_connect(url, params):
             #         self._update('PROXY', params)
             #         return params
             # Если история не помогла — запускаем многопоточный поиск
