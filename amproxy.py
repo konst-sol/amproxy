@@ -111,8 +111,8 @@ def print_status(signum, frame):
         print_ciadpi_status()
         print_params_stat()
         print_summary()
-    except:
-        print_exc()
+    except Exception as err:
+        print_exc(str(err))
 
 # Регистрация обработчика
 def regsig():
@@ -193,7 +193,7 @@ def print_summary():
             else:
                 info(f'В категорию {s} добавлены:')
                 info('\n'.join(f'  {i}' for i in summary[s]))
-    info('\n')
+    info('')
 
 # </DEBUG>
 
@@ -215,6 +215,7 @@ class DomainInfo:
         self.history_params = []  # Список стратегий, которые работали раньше
         self.user_config = user_config # Стратегия задана пользователем
         self.lock = threading.Lock() # для проведения теста
+        self.ip = None
 
     def _update(self, status, params=None):
         # обновляем status, params и test_time
@@ -252,7 +253,7 @@ class DomainInfo:
             # Таймаут
             c.setopt(c.TIMEOUT, PROXY_TEST_TIMEOUT)
         else:
-            # для проверки доступности используем метод HEAD (без тела)
+            # для проверки доступности напрямую используем метод HEAD (без тела)
             c.setopt(c.NOBODY, True)
             c.setopt(c.TIMEOUT, DIRECT_TEST_TIMEOUT)
         # Важная опция при работе в многопоточных средах
@@ -285,26 +286,49 @@ class DomainInfo:
             return True
         return False
 
-    def _try_http_connect(self, target_url, params=None):
-        debug(f'{target_url} [{params}]')
-        proc = None
+    def _try_dns(self):
+        # Проверяем DNS
+        try:
+            ip = socket.gethostbyname(self.domain)
+            # Для честной проверки можно добавить сравнение с DoH через requests
+            debug(f'[OK] IP: {ip}')
+            return ip
+        except socket.gaierror:
+            debug('[BLOCK] Не удалось разрешить имя. Используйте DoH')
+            return None
+
+    def _try_tcp(self, ip, port):
+        # Проверка доступности IP (L3 блокировка)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        result = sock.connect_ex((ip, port))
+        sock.close()
+        if result == 0:
+            debug('[OK] Порт 443 открыт. IP не заблокирован')
+            return True
+        else:
+            debug('[BLOCK] Тайм-аут. Вероятная блокировка по IP-адресу')
+            return False
+
+    def _try_http(self, url, params=None):
+        debug(f'{url} [{params}]')
         if params:
             # Проверка одной конкретной стратегии
             port = get_free_port()
             proc = run_ciadpi(port, params)
             if not proc:
                 return False
-            c = self._get_curl(target_url, f"socks5h://127.0.0.1:{port}")
+            c = self._get_curl(url, f"socks5h://127.0.0.1:{port}")
         else:
             # Проверка доступности без прокси
-            c = self._get_curl(target_url)
+            c = self._get_curl(url)
         try:
             c.perform()
             return True
         except pycurl.error as err:
             return self._success(*err.args)
         finally:
-            if proc:
+            if params:
                 proc.terminate()
                 proc.wait()
             c.close()
@@ -412,7 +436,7 @@ class DomainInfo:
             return self.params
         return None
 
-    def run_test(self, url):
+    def run_test(self, host, port, is_https):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
         res = self._check_expired()
@@ -423,10 +447,25 @@ class DomainInfo:
             res = self._check_expired()
             if res is not None: return res
 
-            # Проверяем доступен ли ресурс напрямую
+            # Проверяем доступен ли ресурс
             info(f'[*] Проверка {self.domain} напрямую...')
+            # Проверяем DNS
+            ip = self._try_dns()
+            if not ip:
+                # блокировка DNS
+                info(f'[X] {self.domain} ошибка при получении DNS')
+                self._update('FAILED')
+                return 'DIRECT'
+            # Проверяем доступность сервера
+            if not self._try_tcp(ip, port):
+                # скорее всего блокировка по ip-адресу
+                info(f'[X] {self.domain} ошибка подключения к серверу')
+                self._update('FAILED')
+                return 'DIRECT'
+            # Проверяем http (метод HEAD)
+            url = f'{"https://" if is_https else "http://"}{host}:{port}/'
             for _ in range(NUMBER_OF_TESTS):
-                if self._try_http_connect(url):
+                if self._try_http(url):
                     info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
                     self._update('DIRECT')
                     return 'DIRECT'
@@ -455,7 +494,7 @@ class DomainInfo:
                 return params
             # проверка в один поток
             # for params in pre_strats:
-            #     if self._try_http_connect(url, params):
+            #     if self._try_http(url, params):
             #         self._update('PROXY', params)
             #         return params
             # Если история не помогла — запускаем многопоточный поиск
@@ -705,7 +744,7 @@ def handle_client(client_socket):
     try:
         client_socket.settimeout(60)
         request = None
-        try: request = client_socket.recv(8192)
+        try: request = client_socket.recv(16384) # как в ciadpi по дефолту
         except: pass
         if not request: return
 
@@ -717,6 +756,7 @@ def handle_client(client_socket):
             host_port = header_line.split(' ')[1]
             # добавляем порт (443) если не указан
             host, port = (host_port.split(':') + [443])[:2]
+            port = int(port)
             is_https = True
         else:
             # HTTP: ищем заголовок Host
@@ -733,8 +773,7 @@ def handle_client(client_socket):
                 return
 
         dom = get_domain_info(host)
-        url = f'{"https://" if is_https else "http://"}{host}/'
-        params = dom.run_test(url) # получаем стратегию или DIRECT
+        params = dom.run_test(host, port, is_https) # получаем стратегию или DIRECT
 
         # Подключение к серверу
         info(f'[>] Подключение: {host}:{port} '
@@ -756,7 +795,10 @@ def handle_client(client_socket):
             remote_socket.set_proxy(socks.SOCKS5, '127.0.0.1', target_port)
 
         # соединение
-        remote_socket.connect((host, int(port)))
+        try:
+            remote_socket.connect((host, port))
+        except:
+            return
 
         if is_https:
             # Для CONNECT отвечаем клиенту 200 и ничего не шлем серверу (ждем SSL)
@@ -774,7 +816,7 @@ def handle_client(client_socket):
 
     except Exception as err:
         #error(f"Error handling client: {err}")
-        print_exc()
+        print_exc(str(err))
     finally:
         # Важно закрыть оба сокета, чтобы освободить дескрипторы
         for s in [client_socket, remote_socket]:
