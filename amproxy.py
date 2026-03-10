@@ -7,10 +7,11 @@ from fnmatch import fnmatch
 # для сети
 import socket
 import socks
-import pycurl
+import asyncio
+from curl_cffi import requests, CurlError
+from curl_cffi.requests.exceptions import RequestException
 import threading
 import subprocess
-from io import BytesIO
 # для логирования
 import logging, logging.handlers
 from logging import debug, info, error
@@ -25,6 +26,7 @@ HOST = '127.0.0.1'
 PORT = 8888 # порт этой программы
 STRATEGIES_FILE = 'params.txt'
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else './ciadpi'
+IMPERSONATE = 'chrome120' # каким браузером прикидываемся
 # Файлы для кэширования информации о проверках по одному домену на строке
 # в скобках - формат строки
 RULES_FILE = 'rules.txt' # стратегии (домен<пробел>время_проведения_теста<пробел>стратегия)
@@ -134,6 +136,9 @@ def setup_logging():
     # Вывод exception
     global print_exc
     print_exc = logger.exception
+    # отключить вывод asyncio и curl_cffi
+    #logging.getLogger("asyncio").setLevel(logging.WARNING)
+    #logging.getLogger("curl_cffi").setLevel(logging.WARNING)
 
     return listener
 
@@ -233,7 +238,6 @@ def print_summary():
 # </DEBUG>
 
 # <DOMAININFO>
-
 class DomainInfo:
     TTL = {
         # время устаревания разных статусов
@@ -250,7 +254,7 @@ class DomainInfo:
         self.history_params = []  # Список стратегий, которые работали раньше
         self.user_config = user_config # Стратегия задана пользователем
         self.lock = threading.Lock() # для проведения теста
-        self.ip = None
+
 
     def _update(self, status, params=None):
         # обновляем status, params и test_time
@@ -270,59 +274,32 @@ class DomainInfo:
             # не обновляем если пользовательская стратегия
             self.test_time = int(time.time())
 
-    @staticmethod
-    def _get_curl(url, proxy=None):
-        # Настройка curl
-        c = pycurl.Curl()
-        c.setopt(c.URL, url)
-        # Переход по редиректам, так как многие сайты при проверке
-        # доступности могут перенаправлять с http на https
-        c.setopt(c.FOLLOWLOCATION, True)
-        if proxy:
-            # Используем setopt(c.WRITEDATA, buffer) потому что
-            # с (c.WRITEFUNCTION, lambda x: None) для каждого пришедшего
-            # пакета данных (chunk) libcurl вызывает интерпретатор Python,
-            # чтобы выполнить lambda
-            buffer = BytesIO()
-            c.setopt(c.WRITEDATA, buffer)
-            # Таймаут
-            c.setopt(c.TIMEOUT, PROXY_TEST_TIMEOUT)
-        else:
-            # для проверки доступности напрямую используем метод HEAD (без тела)
-            c.setopt(c.NOBODY, True)
-            c.setopt(c.TIMEOUT, DIRECT_TEST_TIMEOUT)
-        # Важная опция при работе в многопоточных средах
-        # или при быстром создании/удалении хендлов.
-        # Предотвращает падения из-за системных сигналов таймера
-        c.setopt(c.NOSIGNAL, 1)
-        # Гарантирует, что каждый новый тест идет через
-        # "чистое" соединение, а не использует старый открытый сокет
-        # от предыдущего набора параметров
-        c.setopt(c.FORBID_REUSE, 1)
-        if proxy:
-            c.setopt(c.PROXY, proxy)
-        return c
 
-    @staticmethod
-    def _success(errno, errmsg):
-        # проверяет код возврата и сообщение об ошибке curl
-        if errno == 35:
-            # ошибка SSL/TLS
-            if 'unsupported protocol' in errmsg:
+    def _check_error(self, e):
+        # проверяем Exception
+        err_code = getattr(e, 'code', 0)
+        err_msg = str(e).lower()
+
+        # 60 (плохой сертификат) - успех
+        if err_code == 60:
+            # соединение установлено, но сервер использует
+            # устаревший сертификат безопасности. считаем успехом
+            return True
+
+        # 35 (SSL Connect) - успех ТОЛЬКО если протокол не поддерживается
+        if err_code == 35:
+            if 'unsupported protocol' in err_msg or 'version' in err_msg:
                 # unsupported protocol - соединение установлено,
                 # но сервер не поддерживает современные протоколы.
                 # считаем успехом
                 return True
             # если alert decode error, alert handshake failure
             # значит стратегия портит данные
-        if errno == 60:
-            # соединение установлено, но сервер использует
-            # устаревший сертификат безопасности. считаем успехом
-            return True
         return False
 
+
     def _try_dns(self):
-        # Проверяем DNS
+        # Проверка DNS
         try:
             ip = socket.gethostbyname(self.domain)
             # Для честной проверки можно добавить сравнение с DoH через requests
@@ -345,116 +322,24 @@ class DomainInfo:
             debug(f'[BLOCK] {self.domain} Тайм-аут. Вероятная блокировка по IP-адресу')
             return False
 
-    def _try_http(self, url, params=None):
-        debug(f'{url} [{params}]')
-        if params:
-            # Проверка одной конкретной стратегии
-            port = get_free_port()
-            proc = run_ciadpi(port, params)
-            if not proc:
-                return False
-            c = self._get_curl(url, f'socks5h://127.0.0.1:{port}')
-        else:
-            # Проверка доступности без прокси
-            c = self._get_curl(url)
+    def _try_http(self, url):
+        # Проверка прямого доступа по http. Используем метод HEAD
+        debug(url)
         try:
-            c.perform()
-            return True
-        except pycurl.error as err:
-            return self._success(*err.args)
-        finally:
-            if params:
-                proc.terminate()
-                proc.wait()
-            c.close()
+            response = requests.head(
+                url, 
+                impersonate=IMPERSONATE, 
+                timeout=DIRECT_TEST_TIMEOUT,
+                verify=False
+            )
+            return response.status_code is not None
+        except (CurlError, RequestException) as e:
+            return self._check_error(e)
+        except Exception:
+            return False
 
-    def find_working_params(self, target_url, strats):
-        # Проверяет стратегии в несколько потоков и возвращает
-        # первую успешную стратегию или None
-        debug(f'target_url: {target_url}')
-        multi = pycurl.CurlMulti()
-        active_reqs = {}  # {curl_handle: {'proc': popen_obj, 'params': str}}
-        pending_params = list(enumerate(strats))
-        final_params = None
 
-        def start_worker(idx, params):
-            port = get_free_port()
-            try:
-                proc = run_ciadpi(port, params)
-                if not proc:
-                    return
-                for _ in range(NUMBER_OF_TESTS):
-                    # проверяем стратегию несколько раз
-                    c = self._get_curl(target_url, f'socks5h://127.0.0.1:{port}')
-                    multi.add_handle(c)
-                    active_reqs[c] = {'proc': proc, 'params': params}
-
-            except Exception as err:
-                debug(f'[Ex] {err}')
-
-        # Первоначальный запуск проверок (в количестве CURL_THREAD_LIMIT штук)
-        for _ in range(min(CURL_THREAD_LIMIT, len(pending_params))):
-            idx, p = pending_params.pop(0)
-            start_worker(idx, p)
-            # следующую проверку запускаем через 0.1 сек
-            # чтобы более простые стратегии имели небольшое преимущество
-            time.sleep(0.1)
-
-        try:
-            while active_reqs and not final_params:
-                while True:
-                    ret, num_handles = multi.perform()
-                    if ret != pycurl.E_CALL_MULTI_PERFORM:
-                        break
-
-                while True:
-                    queued, ok_list, err_list = multi.info_read()
-                    # Если запрос прошел успешно
-                    for c in ok_list:
-                        res = active_reqs.pop(c)
-                        final_params = res['params']
-                        # curl.close() и proc.terminate() будут вызваны в finally
-                        break
-
-                    # Если запрос завершился ошибкой
-                    for c, errno, errmsg in err_list:
-                        res = active_reqs.pop(c)
-                        if DomainInfo._success(errno, errmsg):
-                            # не все ошибки это неудача
-                            final_params = res['params']
-                            break
-
-                        multi.remove_handle(c)
-                        #if res['proc'].poll() is not None:
-                        res['proc'].terminate()
-                        res['proc'].wait()
-                        c.close()
-
-                        if not final_params and pending_params:
-                            idx, p = pending_params.pop(0)
-                            start_worker(idx, p)
-
-                    if final_params or queued == 0:
-                        break
-                multi.select(0.1)
-
-        finally:
-            # Чистим всё при любом исходе
-            for c, res in active_reqs.items():
-                try:
-                    proc = res['proc']
-                    if proc.poll() is not None:
-                        proc.terminate()
-                        proc.wait()
-                except: pass
-                multi.remove_handle(c)
-                c.close()
-            multi.close()
-
-        debug(f'found: {final_params}')
-        return final_params
-
-    def _check_expired(self):
+    def check_expired(self):
         # возвращает None если требуется проверка
         # в противном случае DIRECT или params
         if not self.status:
@@ -466,20 +351,104 @@ class DomainInfo:
         if not res:
             if self.status in ('DIRECT', 'FAILED'):
                 return 'DIRECT'
-            info(f'[!] Используем стратегию для {self.domain}: {self.params}')
             return self.params
         return None
+
+
+    async def check_param(self, url, params, found_event, semaphore):
+        # Проверка одной стратегии
+        async with semaphore:
+            if found_event.is_set():
+                return None
+
+            port = get_free_port()
+            args = params.split()
+            # Запускаем ciadpi
+            # (не используем run_ciadpi потому что async)
+            proc = await asyncio.create_subprocess_exec(
+                CIADPI_EXE, '-i', '127.0.0.1', '-p', str(port), *args,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.sleep(0.4) # Пауза на инициализацию прокси
+            if proc.returncode is not None:
+                # proc.poll() отсутствует
+                return None
+            try:
+                proxy_url = f'socks5h://127.0.0.1:{port}'
+                proxies = {'http': proxy_url, 'https': proxy_url}
+                # Пытаемся проверить конфиг NUMBER_OF_TESTS раз
+                for attempt in range(NUMBER_OF_TESTS):
+                    if found_event.is_set():
+                        return None
+                    try:
+                        async with requests.AsyncSession() as s:
+                            response = await s.get(
+                                url, 
+                                proxies=proxies,
+                                impersonate=IMPERSONATE,
+                                timeout=PROXY_TEST_TIMEOUT
+                            )
+
+                            # Успех. Ставим флаг для всех остальных
+                            found_event.set()
+                            return params
+                    except (CurlError, RequestException) as e:
+                        if self._check_error(e):
+                            found_event.set()
+                            return params
+                    except Exception:
+                        # Если попытка не удалась, просто пробуем следующую
+                        pass
+                    # Короткая пауза между попытками внутри одной стратегии
+                    await asyncio.sleep(0.5)
+            finally:
+                # Корректно завершаем ciadpi в любом случае
+                if proc.returncode is None:
+                    proc.terminate()
+                    await proc.wait()
+        return None
+
+
+    async def find_working_params(self, url, params_list):
+        semaphore = asyncio.Semaphore(CURL_THREAD_LIMIT)
+        found_event = asyncio.Event()
+        tasks = [
+            asyncio.create_task(self.check_param(url, p, found_event, semaphore))
+            for p in params_list ]
+
+        result_param = None
+        try:
+            # as_completed вернет первую задачу, которая выполнила return
+            for finished_task in asyncio.as_completed(tasks):
+                res = await finished_task
+                if res:
+                    result_param = res
+                    break # Нашли первый рабочий конфиг, выходим
+        finally:
+            # Отменяем все проверки, которые еще висят в очереди или в процессе
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        return result_param
+
 
     def run_test(self, host, port, is_https):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
-        res = self._check_expired()
-        if res is not None: return res
+        res = self.check_expired()
+        if res is not None:
+            info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
+            return res
 
         with self.lock:
             # Double-check: вдруг кто-то уже проверил, пока мы ждали замок
-            res = self._check_expired()
-            if res is not None: return res
+            res = self.check_expired()
+            if res is not None:
+                info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
+                return res
 
             # Проверяем доступен ли ресурс
             info(f'[*] Проверка {self.domain} напрямую...')
@@ -517,28 +486,22 @@ class DomainInfo:
                     pre_strats.append(params)
             # Добавляем работающие стратегии
             for dom in domain_registry.values():
-                if dom.params not in pre_strats:
+                if dom.params and dom.params not in pre_strats:
                     pre_strats.append(dom.params)
             debug(f'Предварительная проверка {len(pre_strats)} стратегий')
             # Предварительная проверка
-            # проверка в несколько потоков
-            params = self.find_working_params(url, pre_strats)
+            params = asyncio.run(self.find_working_params(url, pre_strats))
             if params:
                 self._update('PROXY', params)
                 return params
-            # проверка в один поток
-            # for params in pre_strats:
-            #     if self._try_http(url, params):
-            #         self._update('PROXY', params)
-            #         return params
-            # Если история не помогла — запускаем многопоточный поиск
+            # Если история не помогла — запускаем поиск
             # по всем остальным strategies
             remaining_starts = []
             for params in strategies:
                 if params not in pre_strats:
                     remaining_starts.append(params)
             debug(f'Проверка остальных {len(remaining_starts)} стратегий')
-            params = self.find_working_params(url, remaining_starts)
+            params = asyncio.run(self.find_working_params(url, remaining_starts))
             if params:
                 self._update('PROXY', params)
                 return params
@@ -549,11 +512,12 @@ class DomainInfo:
 # </DOMAININFO>
 
 # <DOMAINREGISTRY>
-
+# dict-подобный класс - список всех доменов
+# ключ: доменное имя (строка), значение: объект класса DomainInfo
 class DomainRegistry:
     def __init__(self):
-        self._auto_data = {}  # Программные домены
-        self._user_data = {}  # Пользовательские (в т.ч. с *)
+        self._auto_data = {}  # Программные (автоматические) домены
+        self._user_data = {}  # Пользовательские из user-rules.txt (в т.ч. с *)
         self._wildcard_keys = set() # Быстрый доступ к списку масок
 
     def __setitem__(self, key, value):
@@ -578,7 +542,7 @@ class DomainRegistry:
         # Точное совпадение в авто-доменах
         if key in self._auto_data:
             return self._auto_data[key]
-        raise KeyError(f"Домен '{key}' не найден")
+        raise KeyError(f'Домен "{key}" не найден')
 
     def __contains__(self, key):
         # Используем логику getitem, но возвращаем True/False
@@ -622,7 +586,7 @@ def get_domain_info(domain):
 # <DOMAINREGISTRY/>
 
 # <LOAD_RULES/SAVE_RULES>
-
+# загрузка/сохранение кэша
 # переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
 RULES_FILE = CACHE_DIR / RULES_FILE
@@ -673,7 +637,9 @@ def load_rules():
             if not s: continue
             domain, params = s.split(maxsplit=1)
             params = params.split('|')
-            domain_registry[domain].history_params = params
+            dom = domain_registry.get(domain)
+            if dom:
+                dom.history_params = params
 
 
 def save_rules():
@@ -716,7 +682,7 @@ def get_params_to_port(params):
 
 
 def get_free_port():
-    # запрашиваем свободный порт и возвращаем его
+    # Запрашиваем у ОС свободный порт и возвращаем его
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         # SO_REUSEADDR позволяет повторно использовать порт сразу после закрытия
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -766,6 +732,7 @@ def ensure_ciadpi(port, params):
         return False
 
 
+# <SERVER>
 def pipe(source, destination):
     # Пересылает данные между сокетами до закрытия одного из них.
     try:
@@ -935,9 +902,9 @@ def start_proxy():
         listener.stop()
         print('Uptime:', timedelta(seconds=int(time.time()-start_time)))
 
+# <SERVER/>
+
 #
 if __name__ == "__main__":
-    pycurl.global_init(pycurl.GLOBAL_ALL)
     start_proxy()
-    pycurl.global_cleanup()
 #
