@@ -27,3 +27,4 @@
 * ciadpi (бинарник [ByeDPI](https://github.com/hufrea/byedpi))
 * PySocks
 * curl_cffi
+* BeautifulSoup
