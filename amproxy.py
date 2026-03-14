@@ -394,7 +394,8 @@ class DomainInfo:
                                 url,
                                 proxies=proxies,
                                 impersonate=IMPERSONATE,
-                                timeout=PROXY_TEST_TIMEOUT
+                                timeout=PROXY_TEST_TIMEOUT,
+                                allow_redirects=True
                             )
 
                             # Успех. Ставим флаг для всех остальных
@@ -438,19 +439,18 @@ class DomainInfo:
         min_bytes = min_kb * 1024
         found_results = []
 
-        async with AsyncSession(impersonate="chrome110", proxies=proxies, max_clients=20) as session:
+        async with AsyncSession(impersonate="chrome110", allow_redirects=True,
+                                proxies=proxies, max_clients=20) as session:
             try:
                 # Загрузка основной страницы
                 debug(f'target_url: {target_url}')
                 resp = await session.get(target_url, timeout=10)
-                soup = BeautifulSoup(resp.text, "html.parser")
             except Exception as err:
                 print(f"Ошибка загрузки страницы: {err}")
                 print_exc(str(err))
                 return []
 
-            urls = set()
-
+            soup = BeautifulSoup(resp.text, "html.parser")
             # Собираем картинки, скрипты и стили
             tags_config = {
                 'img': ['src', 'data-src', 'data-lazy-src'],
@@ -459,13 +459,15 @@ class DomainInfo:
                 'link': ['href']
             }
 
+            urls = set()
             for tag_name, attrs in tags_config.items():
                 for tag in soup.find_all(tag_name):
                     # Фильтр для <link>: только стили и иконки
                     if tag_name == 'link':
                         rel = tag.get('rel', [])
                         if not any(r in (rel if isinstance(rel, list) else [rel]) 
-                                   for r in ['stylesheet', 'icon', 'preload', 'shortcut icon']):
+                                   for r in ['stylesheet', 'icon', 'preload',
+                                             'shortcut icon']):
                             continue
 
                     for attr in attrs:
@@ -484,9 +486,7 @@ class DomainInfo:
 
             print(f"Проверка {len(urls)} ресурсов для отрисовки...")
 
-
             tasks = [self.check_url(session, url, min_bytes) for url in urls]
-
             try:
                 # Четкий лимит на всю проверку
                 for coro in asyncio.as_completed(tasks, timeout=max_duration):
@@ -1070,7 +1070,9 @@ def test16():
 
 #
 if __name__ == "__main__":
-    #start_proxy()
-    test16()
+    if sys.argv[1:]:
+        test16()
+    else:
+        start_proxy()
 
 #
