@@ -12,6 +12,10 @@ from curl_cffi import requests, CurlError
 from curl_cffi.requests.exceptions import RequestException
 import threading
 import subprocess
+# 16k
+from curl_cffi.requests import AsyncSession
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 # для логирования
 import logging, logging.handlers
 from logging import debug, info, error
@@ -44,7 +48,8 @@ CACHE_DIR = 'cache'
 DIRECT_TEST_TIMEOUT = 3 # таймаут для проверки доступности (секунды)
 PROXY_TEST_TIMEOUT = 2 # таймаут для поиска стратегии
 CURL_THREAD_LIMIT = 8 # сколько потоков использовать для проверки стратегий
-NUMBER_OF_TESTS = 3 # количество проверок прямой доступности и каждой стратегии
+DIRECT_HTTP_METHOD = 'get' # GET/HEAD какой метод http использовать
+NUMBER_OF_TESTS = 2 # количество проверок прямой доступности и каждой стратегии
 # время устаревания разных статусов в часах:
 DIRECT_TTL = 7*24 # прямое подключение
 PROXY_TTL = 7*24 # подключение через ciadpi
@@ -255,6 +260,7 @@ class DomainInfo:
         self.user_config = user_config # Стратегия задана пользователем
         self.lock = threading.Lock() # чтобы не запускать несколько run_test одновременно
         self.semaphore = asyncio.Semaphore(CURL_THREAD_LIMIT) # ограничение одновременных проверок стратегий
+        self.semaphore_16k = asyncio.Semaphore(10)
 
 
     def _update(self, status, params=None):
@@ -274,6 +280,22 @@ class DomainInfo:
         if not self.user_config:
             # не обновляем если пользовательская стратегия
             self.test_time = int(time.time())
+
+
+    def check_expired(self):
+        # возвращает None если требуется проверка
+        # в противном случае DIRECT или params
+        if not self.status:
+            return None
+        if self.user_config:
+            # не проверяем устаревание
+            return self.params
+        res = (time.time() - self.test_time) > self.TTL.get(self.status, 3600)
+        if not res:
+            if self.status in ('DIRECT', 'FAILED'):
+                return 'DIRECT'
+            return self.params
+        return None
 
 
     def _check_error(self, e):
@@ -326,34 +348,19 @@ class DomainInfo:
         # Проверка прямого доступа по http
         debug(url)
         try:
-            #response = requests.get( # Используем метод GET
-            response = requests.head( # Используем метод HEAD
-                url,
-                impersonate=IMPERSONATE,
-                timeout=DIRECT_TEST_TIMEOUT,
-                verify=False
-            )
+            kw = {'impersonate': IMPERSONATE,
+                  'timeout': DIRECT_TEST_TIMEOUT,
+                  'verify': False}
+            if DIRECT_HTTP_METHOD.lower() == 'get':
+                response = requests.get(url, **kw)
+            else:
+                response = requests.head(url, **kw)
+            debug(response.status_code)
             return response.status_code is not None
-        except (CurlError, RequestException) as e:
-            return self._check_error(e)
+        except (CurlError, RequestException) as err:
+            return self._check_error(err)
         except Exception:
             return False
-
-
-    def check_expired(self):
-        # возвращает None если требуется проверка
-        # в противном случае DIRECT или params
-        if not self.status:
-            return None
-        if self.user_config:
-            # не проверяем устаревание
-            return self.params
-        res = (time.time() - self.test_time) > self.TTL.get(self.status, 3600)
-        if not res:
-            if self.status in ('DIRECT', 'FAILED'):
-                return 'DIRECT'
-            return self.params
-        return None
 
 
     async def _test_params(self, url, params, found_event):
@@ -405,9 +412,93 @@ class DomainInfo:
             finally:
                 # Корректно завершаем ciadpi в любом случае
                 if proc.returncode is None:
+                    debug(f'terminate: {proc}')
                     proc.terminate()
                     await proc.wait()
         return None
+
+
+    async def check_url(self, session, url, min_bytes):
+        # проверяем размер
+        async with self.semaphore_16k:  # Ждем разрешения на выполнение запроса
+            try:
+                res = await session.head(url, timeout=3, allow_redirects=True)
+
+                size = int(res.headers.get("Content-Length", 0))
+                if size > min_bytes:
+                    #debug(f"[+] {size/1024:>7.1f} КБ | {url}")
+                    return (url, size)
+            except Exception:
+                pass
+        return None
+
+    async def scan_page(self, target_url, proxies, min_kb=4, max_duration=5):
+        # скачиваем сираницу, находим на ней ссылки на сторонние
+        # домены и проверяем их
+        min_bytes = min_kb * 1024
+        found_results = []
+
+        async with AsyncSession(impersonate="chrome110", proxies=proxies, max_clients=20) as session:
+            try:
+                # Загрузка основной страницы
+                debug(f'target_url: {target_url}')
+                resp = await session.get(target_url, timeout=10)
+                soup = BeautifulSoup(resp.text, "html.parser")
+            except Exception as err:
+                print(f"Ошибка загрузки страницы: {err}")
+                print_exc(str(err))
+                return []
+
+            urls = set()
+
+            # Собираем картинки, скрипты и стили
+            tags_config = {
+                'img': ['src', 'data-src', 'data-lazy-src'],
+                'source': ['src', 'srcset'],
+                'script': ['src'],
+                'link': ['href']
+            }
+
+            for tag_name, attrs in tags_config.items():
+                for tag in soup.find_all(tag_name):
+                    # Фильтр для <link>: только стили и иконки
+                    if tag_name == 'link':
+                        rel = tag.get('rel', [])
+                        if not any(r in (rel if isinstance(rel, list) else [rel]) 
+                                   for r in ['stylesheet', 'icon', 'preload', 'shortcut icon']):
+                            continue
+
+                    for attr in attrs:
+                        val = tag.get(attr)
+                        if not val: continue
+
+                        # обработка srcset и обычных ссылок
+                        raw_urls = val.split(',')
+                        for item in raw_urls:
+                            clean_item = item.strip().split(' ')[0] # берем только URL
+                            if clean_item:
+                                url = urljoin(target_url, clean_item)
+                                domain = urlparse(url).hostname
+                                if domain not in domain_registry:
+                                    urls.add(url)
+
+            print(f"Проверка {len(urls)} ресурсов для отрисовки...")
+
+
+            tasks = [self.check_url(session, url, min_bytes) for url in urls]
+
+            try:
+                # Четкий лимит на всю проверку
+                for coro in asyncio.as_completed(tasks, timeout=max_duration):
+                    result = await coro
+                    if result:
+                        found_results.append(result)
+            except asyncio.TimeoutError:
+                print(f"\n[!] Лимит {max_duration}с исчерпан. Возвращаем найденное.")
+
+        # Сортировка по размеру (от большего к меньшему)
+        found_results.sort(key=lambda x: x[1], reverse=True)
+        return found_results
 
 
     async def find_working_params(self, url, params_list):
@@ -436,9 +527,10 @@ class DomainInfo:
         return result_param
 
 
-    def run_test(self, host, port, is_https):
+    def run_test(self, host, port, is_https, url=''):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
+        debug(f'{host}, {port}, {is_https}, {url}')
         res = self.check_expired()
         if res is not None:
             info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
@@ -466,49 +558,99 @@ class DomainInfo:
                 info(f'[X] {self.domain} ошибка подключения к серверу')
                 self._update('FAILED')
                 return 'DIRECT'
+            ret = None
             # Проверяем http (метод HEAD)
-            url = f'{"https://" if is_https else "http://"}{host}:{port}/'
+            if url:
+                target_url = url
+            else:
+                target_url = f'{"https://" if is_https else "http://"}{host}:{port}/'
             for _ in range(NUMBER_OF_TESTS):
-                if self._try_http(url):
+                if self._try_http(target_url):
                     info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
                     self._update('DIRECT')
-                    return 'DIRECT'
+                    ret = 'DIRECT'
+                    break
 
-            # Подбор стратегии через ciadpi
-            info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
-            # Проверяем историю (предыдущие рабочие параметры)
-            # Сначала пробуем последний известный рабочий вариант
-            pre_strats = []
-            if self.params:
-                pre_strats.append(self.params)
-            # Добавляем остальные из истории (уникальные)
-            for params in self.history_params:
-                if params not in pre_strats:
-                    pre_strats.append(params)
-            # Добавляем работающие стратегии
-            for dom in domain_registry.values():
-                if dom.params and dom.params not in pre_strats:
-                    pre_strats.append(dom.params)
-            debug(f'Предварительная проверка {len(pre_strats)} стратегий')
-            # Предварительная проверка
-            params = asyncio.run(self.find_working_params(url, pre_strats))
-            if params:
-                self._update('PROXY', params)
-                return params
-            # Если история не помогла — запускаем поиск
-            # по всем остальным strategies
-            remaining_starts = []
-            for params in strategies:
-                if params not in pre_strats:
-                    remaining_starts.append(params)
-            debug(f'Проверка остальных {len(remaining_starts)} стратегий')
-            params = asyncio.run(self.find_working_params(url, remaining_starts))
-            if params:
-                self._update('PROXY', params)
-                return params
-            # подбор параметров закончился неудачей - соединяем напрямую
-            self._update('FAILED')
-            return 'DIRECT'
+            if not ret:
+                # проверка http HEAD не пройдена
+                ret = self._run_test_params(target_url)
+
+            if url:
+                # проверка встроенных в страницу ссылок. 16к не проверяем
+                debug(f'related link: {url}')
+                return ret
+
+            if ret == 'DIRECT':
+                proxies = {}
+            else:
+                # определяем порт ciadpi
+                proxy_port = get_params_to_port(ret)
+                # запуск ciadpi
+                if not ensure_ciadpi(proxy_port, ret):
+                    error('ensure_ciadpi вернул False')
+                    return ret
+                # указываем прокси
+                proxy_url = f'socks5h://127.0.0.1:{proxy_port}'
+                proxies = {'http': proxy_url, 'https': proxy_url}
+
+            # может быть блокировка 16 KB
+            rel_list = asyncio.run(self.scan_page(target_url, proxies,
+                                                  max_duration=5))
+            tested_hosts = []
+            for tested_url, size in rel_list:
+                parsed_url = urlparse(tested_url)
+                host = parsed_url.hostname
+                if host not in tested_hosts:
+                    tested_hosts.append(host)
+                    scheme = parsed_url.scheme
+                    if scheme == 'http':
+                        port = parsed_url.port or 80
+                    elif scheme == 'https':
+                        port = parsed_url.port or 443
+                    else:
+                        continue
+                    dom = get_domain_info(host)
+                    params = dom.run_test(host,  port, scheme=='https', tested_url)
+
+            return ret
+
+
+    def _run_test_params(self, url):
+        # Подбор стратегии через ciadpi
+        info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
+        # Проверяем историю (предыдущие рабочие параметры)
+        # Сначала пробуем последний известный рабочий вариант
+        pre_strats = []
+        if self.params:
+            pre_strats.append(self.params)
+        # Добавляем остальные из истории (уникальные)
+        for params in self.history_params:
+            if params not in pre_strats:
+                pre_strats.append(params)
+        # Добавляем работающие стратегии
+        for dom in domain_registry.values():
+            if dom.params and dom.params not in pre_strats:
+                pre_strats.append(dom.params)
+        debug(f'Предварительная проверка {len(pre_strats)} стратегий')
+        # Предварительная проверка
+        params = asyncio.run(self.find_working_params(url, pre_strats))
+        if params:
+            self._update('PROXY', params)
+            return params
+        # Если история не помогла — запускаем поиск
+        # по всем остальным strategies
+        remaining_starts = []
+        for params in strategies:
+            if params not in pre_strats:
+                remaining_starts.append(params)
+        debug(f'Проверка остальных {len(remaining_starts)} стратегий')
+        params = asyncio.run(self.find_working_params(url, remaining_starts))
+        if params:
+            self._update('PROXY', params)
+            return params
+        # подбор параметров закончился неудачей - соединяем напрямую
+        self._update('FAILED')
+        return 'DIRECT'
 
 # </DOMAININFO>
 
@@ -588,7 +730,7 @@ def get_domain_info(domain):
 
 # <LOAD_RULES/SAVE_RULES>
 # Загрузка/сохранение кэша
-# переназначаем имена файлов в объекты Path
+# Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
 RULES_FILE = CACHE_DIR / RULES_FILE
 #USER_RULES_FILE = CACHE_DIR / USER_RULES_FILE # в подкаталоге CACHE_DIR
@@ -670,6 +812,19 @@ def save_rules():
                 print(f'{dom.domain} {dom.test_time}', file=e)
             if dom.history_params:
                 print(f'{dom.domain} {"|".join(dom.history_params)}', file=h)
+
+def load_strategies():
+    global strategies
+    if not os.path.exists(STRATEGIES_FILE):
+        info(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+        sys.exit()
+    # загрузка стратегий
+    with open(STRATEGIES_FILE) as f:
+        for s in f:
+            s = s.split('#')[0]
+            s = s.strip()
+            if s: strategies.append(s)
+    info(f'[+] Загружено {len(strategies)} стратегий')
 
 # <LOAD_RULES/SAVE_RULES/>
 
@@ -852,19 +1007,8 @@ def start_proxy():
     if not os.path.exists(CIADPI_EXE):
         info(f'Не найден бинарник ByDPI: {STRATEGIES_FILE}. Выход')
         return
-    global strategies
-    if not os.path.exists(STRATEGIES_FILE):
-        info(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
-        return
-    debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID:  {os.getpid()})')
     # загрузка стратегий
-    with open(STRATEGIES_FILE) as f:
-        # добавляем из STRATEGIES_FILE
-        for s in f:
-            s = s.split('#')[0]
-            s = s.strip()
-            if s: strategies.append(s)
-    info(f'[+] Загружено {len(strategies)} стратегий')
+    load_strategies()
     # загрузка кэша
     load_rules()
     # загрузка blacklist
@@ -875,6 +1019,7 @@ def start_proxy():
                 if s: blacklist.add(s)
         info(f'[+] {len(blacklist)} доменов в черном списке')
 
+    debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID:  {os.getpid()})')
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
@@ -901,7 +1046,31 @@ def start_proxy():
 
 # <SERVER/>
 
+def test16():
+    start_time = time.time()
+    listener = setup_logging()
+    # загрузка стратегий
+    load_strategies()
+
+    host = sys.argv[1]
+    dom = get_domain_info(host)
+    try:
+        res = dom.run_test(host, 443, True)
+    finally:
+        for p in active_processes.values():
+            p.terminate()
+            p.wait()
+
+    for domain in domain_registry:
+        dom = domain_registry[domain]
+        info(f'{domain} - {dom.params}')
+
+    listener.stop()
+    print('time:', timedelta(seconds=int(time.time()-start_time)))
+
 #
 if __name__ == "__main__":
-    start_proxy()
+    #start_proxy()
+    test16()
+
 #
