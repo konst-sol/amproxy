@@ -142,7 +142,7 @@ def setup_logging():
     global print_exc
     print_exc = logger.exception
     # отключить вывод asyncio и curl_cffi
-    #logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
     #logging.getLogger("curl_cffi").setLevel(logging.WARNING)
 
     return listener
@@ -259,12 +259,11 @@ class DomainInfo:
         self.history_params = []  # Список стратегий, которые работали раньше
         self.user_config = user_config # Стратегия задана пользователем
         self.lock = threading.Lock() # чтобы не запускать несколько run_test одновременно
-        self.semaphore = asyncio.Semaphore(CURL_THREAD_LIMIT) # ограничение одновременных проверок стратегий
         self.semaphore_16k = asyncio.Semaphore(10)
 
 
     def _update(self, status, params=None):
-        # обновляем status, params и test_time
+        # Обновляем status, params и test_time
         if self.status is None:
             # новый статус
             update_summary(status, self.domain)
@@ -283,7 +282,7 @@ class DomainInfo:
 
 
     def check_expired(self):
-        # возвращает None если требуется проверка
+        # Возвращает None если требуется проверка
         # в противном случае DIRECT или params
         if not self.status:
             return None
@@ -299,7 +298,8 @@ class DomainInfo:
 
 
     def _check_error(self, e):
-        # проверяем Exception
+        # Проверяем Exception
+        # Возвращает True/False
         err_code = getattr(e, 'code', 0)
         err_msg = str(e).lower()
 
@@ -323,6 +323,7 @@ class DomainInfo:
 
     def _try_dns(self):
         # Проверка DNS
+        # Возвращает ip или None
         try:
             ip = socket.gethostbyname(self.domain)
             # Для честной проверки можно добавить сравнение с DoH через requests
@@ -334,6 +335,7 @@ class DomainInfo:
 
     def _try_tcp(self, ip, port):
         # Проверка доступности IP (L3 блокировка)
+        # Возвращает True/False
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(3)
         result = sock.connect_ex((ip, port))
@@ -346,7 +348,7 @@ class DomainInfo:
 
     def _try_http(self, url):
         # Проверка прямого доступа по http
-        debug(url)
+        # Возвращает True/False
         try:
             kw = {'impersonate': IMPERSONATE,
                   'timeout': DIRECT_TEST_TIMEOUT,
@@ -355,7 +357,6 @@ class DomainInfo:
                 response = requests.get(url, **kw)
             else:
                 response = requests.head(url, **kw)
-            debug(response.status_code)
             return response.status_code is not None
         except (CurlError, RequestException) as err:
             return self._check_error(err)
@@ -363,9 +364,49 @@ class DomainInfo:
             return False
 
 
-    async def _test_params(self, url, params, found_event):
+    def _test_strategies(self, url):
+        # Подбор стратегии через ciadpi
+        # Возвращает (params, content) или None
+        info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
+        # Проверяем историю (предыдущие рабочие параметры)
+        # Сначала пробуем последний известный рабочий вариант
+        pre_strats = []
+        if self.params:
+            pre_strats.append(self.params)
+        # Добавляем остальные из истории (уникальные)
+        for params in self.history_params:
+            if params not in pre_strats:
+                pre_strats.append(params)
+        # Добавляем работающие стратегии
+        for dom in domain_registry.values():
+            if dom.params and dom.params not in pre_strats:
+                pre_strats.append(dom.params)
+        debug(f'Предварительная проверка {len(pre_strats)} стратегий')
+        # Предварительная проверка
+        res = asyncio.run(self._find_working_params(url, pre_strats))
+        if res:
+            self._update('PROXY', res[0])
+            return res
+        # Если история не помогла — запускаем поиск
+        # по всем остальным strategies
+        remaining_strats = []
+        for params in strategies:
+            if params not in pre_strats:
+                remaining_strats.append(params)
+        debug(f'Проверка остальных {len(remaining_strats)} стратегий')
+        res = asyncio.run(self._find_working_params(url, remaining_strats))
+        if res:
+            self._update('PROXY', res[0])
+            return res
+        # подбор параметров закончился неудачей - соединяем напрямую
+        self._update('FAILED')
+        return 'DIRECT'
+
+
+    async def _test_params(self, url, params, semaphore, found_event):
         # Проверка одной стратегии
-        async with self.semaphore:
+        # Возвращает (params, content) или None
+        async with semaphore:
             if found_event.is_set():
                 return None
 
@@ -395,16 +436,15 @@ class DomainInfo:
                                 proxies=proxies,
                                 impersonate=IMPERSONATE,
                                 timeout=PROXY_TEST_TIMEOUT,
-                                allow_redirects=True
                             )
 
                             # Успех. Ставим флаг для всех остальных
                             found_event.set()
-                            return params
-                    except (CurlError, RequestException) as e:
-                        if self._check_error(e):
+                            return (params, response.content)
+                    except (CurlError, RequestException) as err:
+                        if self._check_error(err):
                             found_event.set()
-                            return params
+                            return (params, '') # FIXME
                     except Exception:
                         # Если попытка не удалась, просто пробуем следующую
                         pass
@@ -413,109 +453,103 @@ class DomainInfo:
             finally:
                 # Корректно завершаем ciadpi в любом случае
                 if proc.returncode is None:
-                    debug(f'terminate: {proc}')
                     proc.terminate()
                     await proc.wait()
         return None
 
 
-    async def check_url(self, session, url, min_bytes):
-        # проверяем размер
+    async def _check_url(self, session, url):
+        # Скачиваем страницу по ссылке и узнаем ее размер
+        # Возвращает (url, size) или None
         async with self.semaphore_16k:  # Ждем разрешения на выполнение запроса
             try:
-                res = await session.head(url, timeout=3, allow_redirects=True)
-
-                size = int(res.headers.get("Content-Length", 0))
-                if size > min_bytes:
-                    #debug(f"[+] {size/1024:>7.1f} КБ | {url}")
-                    return (url, size)
+                res = await session.get(url, timeout=3)
+            except CurlError:
+                # для заблокированных страниц устанавлиаем большой размер
+                # чтобы они были проверены раньше
+                return (url, 1000000)
             except Exception:
                 pass
+            size = len(res.content)
+            return (url, size)
         return None
 
-    async def scan_page(self, target_url, proxies, min_kb=4, max_duration=5):
-        # скачиваем сираницу, находим на ней ссылки на сторонние
-        # домены и проверяем их
+    async def _scan_page(self, content, target_url, min_kb=16, max_duration=10):
+        # Парсим content, находим ссылки на сторонние
+        # домены и проверяем их на доступность
+        # Возвращает отсортированный по размеру список пар (url, size)
         min_bytes = min_kb * 1024
         found_results = []
+        soup = BeautifulSoup(content, 'html.parser')
+        # Собираем картинки, скрипты и стили
+        tags_config = {
+            'img': ['src', 'data-src', 'data-lazy-src'],
+            'source': ['src', 'srcset'],
+            'script': ['src'],
+            'link': ['href']
+        }
 
-        async with AsyncSession(impersonate="chrome110", allow_redirects=True,
-                                proxies=proxies, max_clients=20) as session:
-            try:
-                # Загрузка основной страницы
-                debug(f'target_url: {target_url}')
-                resp = await session.get(target_url, timeout=10)
-            except Exception as err:
-                print(f"Ошибка загрузки страницы: {err}")
-                print_exc(str(err))
-                return []
+        urls = set()
+        for tag_name, attrs in tags_config.items():
+            for tag in soup.find_all(tag_name):
+                # Фильтр для <link>: только стили и иконки
+                if tag_name == 'link':
+                    rel = tag.get('rel', [])
+                    if not any(r in (rel if isinstance(rel, list) else [rel]) 
+                               for r in ['stylesheet', 'icon', 'preload',
+                                         'shortcut icon']):
+                        continue
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Собираем картинки, скрипты и стили
-            tags_config = {
-                'img': ['src', 'data-src', 'data-lazy-src'],
-                'source': ['src', 'srcset'],
-                'script': ['src'],
-                'link': ['href']
-            }
+                for attr in attrs:
+                    val = tag.get(attr)
+                    if not val: continue
 
-            urls = set()
-            for tag_name, attrs in tags_config.items():
-                for tag in soup.find_all(tag_name):
-                    # Фильтр для <link>: только стили и иконки
-                    if tag_name == 'link':
-                        rel = tag.get('rel', [])
-                        if not any(r in (rel if isinstance(rel, list) else [rel]) 
-                                   for r in ['stylesheet', 'icon', 'preload',
-                                             'shortcut icon']):
-                            continue
+                    # обработка srcset и обычных ссылок
+                    raw_urls = val.split(',')
+                    for item in raw_urls:
+                        clean_item = item.strip().split(' ')[0] # берем только URL
+                        if clean_item:
+                            url = urljoin(target_url, clean_item)
+                            domain = urlparse(url).hostname
+                            if domain not in domain_registry:
+                                urls.add(url)
 
-                    for attr in attrs:
-                        val = tag.get(attr)
-                        if not val: continue
+        debug(f'Проверка {len(urls)} ресурсов на блокировку...')
 
-                        # обработка srcset и обычных ссылок
-                        raw_urls = val.split(',')
-                        for item in raw_urls:
-                            clean_item = item.strip().split(' ')[0] # берем только URL
-                            if clean_item:
-                                url = urljoin(target_url, clean_item)
-                                domain = urlparse(url).hostname
-                                if domain not in domain_registry:
-                                    urls.add(url)
-
-            print(f"Проверка {len(urls)} ресурсов для отрисовки...")
-
-            tasks = [self.check_url(session, url, min_bytes) for url in urls]
+        async with AsyncSession(impersonate=IMPERSONATE,
+                                max_clients=20) as session:
+            tasks = [self._check_url(session, url) for url in urls]
             try:
                 # Четкий лимит на всю проверку
                 for coro in asyncio.as_completed(tasks, timeout=max_duration):
                     result = await coro
-                    if result:
+                    if result and result[1] > min_bytes:
                         found_results.append(result)
             except asyncio.TimeoutError:
-                print(f"\n[!] Лимит {max_duration}с исчерпан. Возвращаем найденное.")
+                debug(f'Лимит {max_duration}с исчерпан. Возвращаем найденное.')
 
         # Сортировка по размеру (от большего к меньшему)
         found_results.sort(key=lambda x: x[1], reverse=True)
         return found_results
 
 
-    async def find_working_params(self, url, params_list):
+    async def _find_working_params(self, url, params_list):
+        # Возвращает (params, content) или None
         found_event = asyncio.Event()
         tasks = []
+        semaphore = asyncio.Semaphore(CURL_THREAD_LIMIT)
         for p in params_list:
-            tsk = asyncio.create_task(self._test_params(url, p, found_event))
+            tsk = asyncio.create_task(self._test_params(url, p, semaphore, found_event))
             tasks.append(tsk)
             await asyncio.sleep(0.2) # небольшое преимущество первым стратегиям
 
-        result_param = None
+        result = None
         try:
             # as_completed вернет первую задачу, которая выполнила return
             for finished_task in asyncio.as_completed(tasks):
                 res = await finished_task
                 if res:
-                    result_param = res
+                    result = res
                     break # Нашли первый рабочий конфиг, выходим
         finally:
             # Отменяем все проверки, которые еще висят в очереди или в процессе
@@ -524,13 +558,13 @@ class DomainInfo:
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        return result_param
+        return result
 
 
-    def run_test(self, host, port, is_https, url=''):
+    def run_test(self, target_url, related=False):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
-        debug(f'{host}, {port}, {is_https}, {url}')
+        # Если related == True - проверяется ссылка из тестируемой страницы
         res = self.check_expired()
         if res is not None:
             info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
@@ -548,22 +582,20 @@ class DomainInfo:
             # Проверяем DNS
             ip = self._try_dns()
             if not ip:
-                # блокировка DNS
+                # Блокировка DNS
                 info(f'[X] {self.domain} ошибка при получении DNS')
                 self._update('FAILED')
                 return 'DIRECT'
             # Проверяем доступность сервера
+            parsed_url = urlparse(target_url)
+            port = int(parsed_url.port or (80 if parsed_url.scheme == 'http' else 443))
             if not self._try_tcp(ip, port):
                 # скорее всего блокировка по ip-адресу
                 info(f'[X] {self.domain} ошибка подключения к серверу')
                 self._update('FAILED')
                 return 'DIRECT'
             ret = None
-            # Проверяем http (метод HEAD)
-            if url:
-                target_url = url
-            else:
-                target_url = f'{"https://" if is_https else "http://"}{host}:{port}/'
+            # Проверяем http
             for _ in range(NUMBER_OF_TESTS):
                 if self._try_http(target_url):
                     info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
@@ -572,85 +604,29 @@ class DomainInfo:
                     break
 
             if not ret:
-                # проверка http HEAD не пройдена
-                ret = self._run_test_params(target_url)
+                # проверка http не пройдена
+                ret = self._test_strategies(target_url)
 
-            if url:
-                # проверка встроенных в страницу ссылок. 16к не проверяем
-                debug(f'related link: {url}')
+            if related:
+                # идет проверка встроенных в страницу ссылок (не создаем рекурсию)
+                return ret
+            if ret == 'DIRECT':
+                # не проверять незаблокированные домены
                 return ret
 
-            if ret == 'DIRECT':
-                proxies = {}
-            else:
-                # определяем порт ciadpi
-                proxy_port = get_params_to_port(ret)
-                # запуск ciadpi
-                if not ensure_ciadpi(proxy_port, ret):
-                    error('ensure_ciadpi вернул False')
-                    return ret
-                # указываем прокси
-                proxy_url = f'socks5h://127.0.0.1:{proxy_port}'
-                proxies = {'http': proxy_url, 'https': proxy_url}
-
+            params, content = ret
             # может быть блокировка 16 KB
-            rel_list = asyncio.run(self.scan_page(target_url, proxies,
-                                                  max_duration=5))
+            rel_list = asyncio.run(self._scan_page(content, target_url))
             tested_hosts = []
             for tested_url, size in rel_list:
                 parsed_url = urlparse(tested_url)
                 host = parsed_url.hostname
                 if host not in tested_hosts:
                     tested_hosts.append(host)
-                    scheme = parsed_url.scheme
-                    if scheme == 'http':
-                        port = parsed_url.port or 80
-                    elif scheme == 'https':
-                        port = parsed_url.port or 443
-                    else:
-                        continue
                     dom = get_domain_info(host)
-                    params = dom.run_test(host,  port, scheme=='https', tested_url)
+                    dom.run_test(tested_url, True)
 
-            return ret
-
-
-    def _run_test_params(self, url):
-        # Подбор стратегии через ciadpi
-        info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
-        # Проверяем историю (предыдущие рабочие параметры)
-        # Сначала пробуем последний известный рабочий вариант
-        pre_strats = []
-        if self.params:
-            pre_strats.append(self.params)
-        # Добавляем остальные из истории (уникальные)
-        for params in self.history_params:
-            if params not in pre_strats:
-                pre_strats.append(params)
-        # Добавляем работающие стратегии
-        for dom in domain_registry.values():
-            if dom.params and dom.params not in pre_strats:
-                pre_strats.append(dom.params)
-        debug(f'Предварительная проверка {len(pre_strats)} стратегий')
-        # Предварительная проверка
-        params = asyncio.run(self.find_working_params(url, pre_strats))
-        if params:
-            self._update('PROXY', params)
             return params
-        # Если история не помогла — запускаем поиск
-        # по всем остальным strategies
-        remaining_starts = []
-        for params in strategies:
-            if params not in pre_strats:
-                remaining_starts.append(params)
-        debug(f'Проверка остальных {len(remaining_starts)} стратегий')
-        params = asyncio.run(self.find_working_params(url, remaining_starts))
-        if params:
-            self._update('PROXY', params)
-            return params
-        # подбор параметров закончился неудачей - соединяем напрямую
-        self._update('FAILED')
-        return 'DIRECT'
 
 # </DOMAININFO>
 
@@ -946,8 +922,9 @@ def handle_client(client_socket):
             debug(f'{host} [BLOCKED]')
             return
 
+        url = f'{"https" if is_https else "http"}://{host}:{port}/'
         dom = get_domain_info(host)
-        params = dom.run_test(host, port, is_https) # получаем стратегию или DIRECT
+        params = dom.run_test(url) # получаем стратегию или DIRECT
 
         # Подключение к серверу
         info(f'[>] Подключение: {host}:{port} '
@@ -1055,18 +1032,18 @@ def test16():
     host = sys.argv[1]
     dom = get_domain_info(host)
     try:
-        res = dom.run_test(host, 443, True)
+        res = dom.run_test(f'https://{host}/')
     finally:
         for p in active_processes.values():
             p.terminate()
             p.wait()
-
+    info('\nНайдены стратегии:')
     for domain in domain_registry:
         dom = domain_registry[domain]
-        info(f'{domain} - {dom.params}')
+        info(f'{domain} {dom.params or "DIRECT"}')
 
     listener.stop()
-    print('time:', timedelta(seconds=int(time.time()-start_time)))
+    print('\ntime:', timedelta(seconds=int(time.time()-start_time)))
 
 #
 if __name__ == "__main__":
