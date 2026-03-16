@@ -460,29 +460,23 @@ class DomainInfo:
         return None
 
 
-    async def _check_url(self, session, url):
-        # Скачиваем страницу по ссылке и узнаем ее размер
-        # Возвращает (url, size) или None
+    async def _check_blocked(self, session, url):
+        # Скачиваем страницу по ссылке и проверяем на доступность
+        # Возвращает url (страница не доступна) или None
         async with self.semaphore_16k:  # Ждем разрешения на выполнение запроса
             try:
                 res = await session.get(url, timeout=3)
             except CurlError:
-                # для заблокированных страниц устанавлиаем большой размер
-                # чтобы они были проверены раньше
-                return (url, 1000000)
+                # страница заблокирована
+                return url
             except Exception:
                 pass
-            size = len(res.content)
-            return (url, size)
         return None
 
-    async def _scan_page(self, content, target_url, proxies,
-                         min_kb=16, max_duration=10):
+    async def _scan_page(self, content, target_url, proxies, max_duration=10):
         # Парсим content, находим ссылки на сторонние
         # домены и проверяем их на доступность
         # Возвращает отсортированный по размеру список пар (url, size)
-        min_bytes = min_kb * 1024
-        found_results = []
         soup = BeautifulSoup(content, 'html.parser')
         # Собираем картинки, скрипты и стили
         tags_config = {
@@ -516,22 +510,21 @@ class DomainInfo:
                             domain = urlparse(url).hostname
                             urls.add(url)
 
-        debug(f'Проверка {len(urls)} ресурсов на блокировку...')
-
+        debug(f'проверка {len(urls)} ресурсов на блокировку...')
+        found_results = []
         async with AsyncSession(impersonate=IMPERSONATE, proxies=proxies,
                                 max_clients=20) as session:
-            tasks = [self._check_url(session, url) for url in urls]
+            tasks = [self._check_blocked(session, url) for url in urls]
             try:
                 # Четкий лимит на всю проверку
                 for coro in asyncio.as_completed(tasks, timeout=max_duration):
                     result = await coro
-                    if result and result[1] > min_bytes:
+                    if result:
                         found_results.append(result)
             except asyncio.TimeoutError:
-                debug(f'Лимит {max_duration}с исчерпан. Возвращаем найденное.')
+                debug(f'лимит {max_duration}с исчерпан. Возвращаем найденное.')
 
-        # Сортировка по размеру (от большего к меньшему)
-        found_results.sort(key=lambda x: x[1], reverse=True)
+        debug(f'найдено {len(found_results)} заблокированных ресурсов')
         return found_results
 
 
@@ -633,15 +626,15 @@ class DomainInfo:
             # может быть блокировка 16 KB
             rel_list = asyncio.run(self._scan_page(content, target_url, proxies))
             tested_hosts = []
-            for tested_url, size in rel_list:
+            for tested_url in rel_list:
                 parsed_url = urlparse(tested_url)
                 host = parsed_url.hostname
                 if host not in tested_hosts:
                     tested_hosts.append(host)
                     dom = get_domain_info(host)
                     if dom is self:
-                        # перепроверяем стратегию на больших размерах
-                        debug(f'перепроверка: {tested_url} {size}')
+                        # перепроверяем стратегию на ссылках из content
+                        debug(f'перепроверка: {tested_url}')
                         ret = self._test_strategies(tested_url)
                         if ret == 'DIRECT':
                             debug('стратегия для обхода 16к не найдена. '
@@ -651,6 +644,7 @@ class DomainInfo:
                             params = ret[0]
                             debug(f'{params} || {self.params}')
                     else:
+                        # новый домен найденный в content
                         dom.run_test(tested_url, True)
 
             return params
