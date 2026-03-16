@@ -264,6 +264,7 @@ class DomainInfo:
 
     def _update(self, status, params=None):
         # Обновляем status, params и test_time
+        debug(f'** {status} -- {params}')
         if self.status is None:
             # новый статус
             update_summary(status, self.domain)
@@ -311,7 +312,7 @@ class DomainInfo:
 
         # 35 (SSL Connect) - успех ТОЛЬКО если протокол не поддерживается
         if err_code == 35:
-            if 'unsupported protocol' in err_msg or 'version' in err_msg:
+            if 'unsupported protocol' in err_msg:
                 # unsupported protocol - соединение установлено,
                 # но сервер не поддерживает современные протоколы.
                 # считаем успехом
@@ -612,9 +613,10 @@ class DomainInfo:
                 return ret[0] # не используется
 
             params, content = ret
+            debug(f'params: {params}')
 
             # определяем порт ciadpi
-            proxy_port = get_params_to_port(ret)
+            proxy_port = get_params_to_port(params)
             # запуск ciadpi
             if not ensure_ciadpi(proxy_port, params):
                 error('ensure_ciadpi вернул False')
@@ -820,7 +822,7 @@ def load_strategies():
         for s in f:
             s = s.split('#')[0]
             s = s.strip()
-            if s: strategies.append(s)
+            if s and s not in strategies: strategies.append(s)
     info(f'[+] Загружено {len(strategies)} стратегий')
 
 # <LOAD_RULES/SAVE_RULES/>
