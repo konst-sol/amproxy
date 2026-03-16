@@ -15,6 +15,11 @@ import subprocess
 # 16k
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
+# from bs4 import XMLParsedAsHTMLWarning
+# import warnings
+# # Отключаем предупреждение BeautifulSoup
+# # "you're using an HTML parser to parse an XML document"
+# warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from urllib.parse import urljoin, urlparse
 # для логирования
 import logging, logging.handlers
@@ -264,7 +269,6 @@ class DomainInfo:
 
     def _update(self, status, params=None):
         # Обновляем status, params и test_time
-        debug(f'** {status} -- {params}')
         if self.status is None:
             # новый статус
             update_summary(status, self.domain)
@@ -505,10 +509,11 @@ class DomainInfo:
                     # обработка srcset и обычных ссылок
                     raw_urls = val.split(',')
                     for item in raw_urls:
+                        # data:image/gif;base64
+                        if item.startswith('data:'): continue
                         clean_item = item.strip().split(' ')[0] # берем только URL
                         if clean_item:
                             url = urljoin(target_url, clean_item)
-                            domain = urlparse(url).hostname
                             urls.add(url)
 
         debug(f'проверка {len(urls)} ресурсов на блокировку...')
@@ -602,19 +607,16 @@ class DomainInfo:
             if not ret:
                 # проверка http не пройдена
                 ret = self._test_strategies(target_url)
-                if not ret:
+                if ret == 'DIRECT':
                     info(f'[X] {self.domain} стратегия не найдена')
                     self._update('FAILED')
                     return 'DIRECT'
-
 
             if related:
                 # идет проверка встроенных в страницу ссылок (не создаем рекурсию)
                 return ret[0] # не используется
 
             params, content = ret
-            debug(f'params: {params}')
-
             # определяем порт ciadpi
             proxy_port = get_params_to_port(params)
             # запуск ciadpi
