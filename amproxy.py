@@ -366,7 +366,7 @@ class DomainInfo:
 
     def _test_strategies(self, url):
         # Подбор стратегии через ciadpi
-        # Возвращает (params, content) или None
+        # Возвращает (params, content) или 'DIRECT'
         info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
         # Проверяем историю (предыдущие рабочие параметры)
         # Сначала пробуем последний известный рабочий вариант
@@ -386,6 +386,7 @@ class DomainInfo:
         res = asyncio.run(self._find_working_params(url, pre_strats))
         if res:
             self._update('PROXY', res[0])
+            debug(f'найдена стратегия для {self.domain}: {res[0]}')
             return res
         # Если история не помогла — запускаем поиск
         # по всем остальным strategies
@@ -397,6 +398,7 @@ class DomainInfo:
         res = asyncio.run(self._find_working_params(url, remaining_strats))
         if res:
             self._update('PROXY', res[0])
+            debug(f'найдена стратегия для {self.domain}: {res[0]}')
             return res
         # подбор параметров закончился неудачей - соединяем напрямую
         self._update('FAILED')
@@ -474,7 +476,8 @@ class DomainInfo:
             return (url, size)
         return None
 
-    async def _scan_page(self, content, target_url, min_kb=16, max_duration=10):
+    async def _scan_page(self, content, target_url, proxies,
+                         min_kb=16, max_duration=10):
         # Парсим content, находим ссылки на сторонние
         # домены и проверяем их на доступность
         # Возвращает отсортированный по размеру список пар (url, size)
@@ -511,12 +514,11 @@ class DomainInfo:
                         if clean_item:
                             url = urljoin(target_url, clean_item)
                             domain = urlparse(url).hostname
-                            if domain not in domain_registry:
-                                urls.add(url)
+                            urls.add(url)
 
         debug(f'Проверка {len(urls)} ресурсов на блокировку...')
 
-        async with AsyncSession(impersonate=IMPERSONATE,
+        async with AsyncSession(impersonate=IMPERSONATE, proxies=proxies,
                                 max_clients=20) as session:
             tasks = [self._check_url(session, url) for url in urls]
             try:
@@ -600,23 +602,36 @@ class DomainInfo:
                 if self._try_http(target_url):
                     info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
                     self._update('DIRECT')
-                    ret = 'DIRECT'
-                    break
+                    return 'DIRECT' # не проверять незаблокированные домены
+
 
             if not ret:
                 # проверка http не пройдена
                 ret = self._test_strategies(target_url)
+                if not ret:
+                    info(f'[X] {self.domain} стратегия не найдена')
+                    self._update('FAILED')
+                    return 'DIRECT'
+
 
             if related:
                 # идет проверка встроенных в страницу ссылок (не создаем рекурсию)
-                return ret
-            if ret == 'DIRECT':
-                # не проверять незаблокированные домены
-                return ret
+                return ret[0] # не используется
 
             params, content = ret
+
+            # определяем порт ciadpi
+            proxy_port = get_params_to_port(ret)
+            # запуск ciadpi
+            if not ensure_ciadpi(proxy_port, params):
+                error('ensure_ciadpi вернул False')
+                return ret
+            # указываем прокси
+            proxy_url = f'socks5h://127.0.0.1:{proxy_port}'
+            proxies = {'http': proxy_url, 'https': proxy_url}
+
             # может быть блокировка 16 KB
-            rel_list = asyncio.run(self._scan_page(content, target_url))
+            rel_list = asyncio.run(self._scan_page(content, target_url, proxies))
             tested_hosts = []
             for tested_url, size in rel_list:
                 parsed_url = urlparse(tested_url)
@@ -624,7 +639,19 @@ class DomainInfo:
                 if host not in tested_hosts:
                     tested_hosts.append(host)
                     dom = get_domain_info(host)
-                    dom.run_test(tested_url, True)
+                    if dom is self:
+                        # перепроверяем стратегию на больших размерах
+                        debug(f'перепроверка: {tested_url} {size}')
+                        ret = self._test_strategies(tested_url)
+                        if ret == 'DIRECT':
+                            debug('стратегия для обхода 16к не найдена. '
+                                  f'для {host} будут недоступны '
+                                  'большие файлы')
+                        else:
+                            params = ret[0]
+                            debug(f'{params} || {self.params}')
+                    else:
+                        dom.run_test(tested_url, True)
 
             return params
 
@@ -1032,7 +1059,7 @@ def test16():
     host = sys.argv[1]
     dom = get_domain_info(host)
     try:
-        res = dom.run_test(f'https://{host}/')
+        res = dom.run_test(f'https://{host}')
     finally:
         for p in active_processes.values():
             p.terminate()
