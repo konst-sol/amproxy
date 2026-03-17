@@ -509,10 +509,10 @@ class DomainInfo:
                     # обработка srcset и обычных ссылок
                     raw_urls = val.split(',')
                     for item in raw_urls:
-                        # data:image/gif;base64
-                        if item.startswith('data:'): continue
                         clean_item = item.strip().split(' ')[0] # берем только URL
-                        if clean_item:
+                        # data:image/gif;base64
+                        if (clean_item and
+                            not clean_item.startswith(('data:', 'blob:'))):
                             url = urljoin(target_url, clean_item)
                             urls.add(url)
 
