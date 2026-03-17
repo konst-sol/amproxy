@@ -642,8 +642,7 @@ class DomainInfo:
                         ret = self._test_strategies(tested_url)
                         if ret == 'DIRECT':
                             debug('стратегия для обхода 16к не найдена. '
-                                  f'для {host} будут недоступны '
-                                  'большие файлы')
+                                  f'для {host} будут недоступны большие файлы')
                         else:
                             params = ret[0]
                             debug(f'{params} || {self.params}')

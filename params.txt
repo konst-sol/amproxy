@@ -1,3 +1,8 @@
+-o1 -a1 -d1
+-o1 -a1
+-o1 -n1
+-q1 -a1 -d1
+-o3 -d7 -a1
 -f1+nme -t6 -a1
 -n ya.ru -Qr -f-1 -r1+s -a1
 -s1 -q1 -a1 -Y -S -f-1 -r1+s -d1+s -O1 -s29+s
@@ -5,17 +10,12 @@
 -n google.com -Qr -m0x02 -f-1 -d7 -a1
 -s1 -q1 -Y -a1 -f-1 -r1+s
 -s1 -d1 -a1 -Y -d5 -o1+s -f-1 -r1+s -s-1
--o1 -n1
--o1 -a1
 -s25 -r5+s -s25+s -a1 -s50 -s50+s
 -r-1+s -o20+sm -s3:7+sm -d5:3+sm -f300+s -Qr -Y -f-1 -a1
--q1 -a1 -d1
--o3 -d7 -a1
 -n ya.ru -Qr -f6+nr -d2 -d11 -f9+hm -o3 -t7 -a1
 -n google.com -Qr -f-1 -r1+s -a1
 -d1+s -o2 -s5 -r5 -a1
 -o1 -a1 -f-1 -r1+s -t6
--o1 -a1 -d1
 -r8 -o2 -s7 -q4+s -a1
 -o1+s -d3+s -a1
 -o1 -s4 -s6 -a1
