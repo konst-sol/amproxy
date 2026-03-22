@@ -43,6 +43,7 @@ USER_RULES_FILE = 'user-rules.txt' # пользовательские страт
 DIRECT_FILE = 'direct.txt' # домены доступные напрямую (домен<пробел>время_проведения_теста)
 FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
 HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
+URLS_FILE = 'urls.txt' # список urls, найденных при парсинге страницы
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 # Конфигурационный файл
 CONFIG_FILE = 'amproxy.ini'
@@ -477,7 +478,7 @@ class DomainInfo:
                 pass
         return None
 
-    async def _scan_page(self, content, target_url, proxies, max_duration=10):
+    async def _scan_page(self, content, target_url, proxies, max_duration=30):
         # Парсим content, находим ссылки и проверяем их на доступность
         # Возвращает список url
         soup = BeautifulSoup(content, 'html.parser')
@@ -628,7 +629,7 @@ class DomainInfo:
                 parsed_url = urlparse(tested_url)
                 host = parsed_url.hostname
                 dom = get_domain_info(host)
-                dom.urls.add((params, tested_url))
+                dom.urls.add(tested_url)
                 if host not in tested_hosts:
                     tested_hosts.append(host)
                     if dom is self:
@@ -642,7 +643,10 @@ class DomainInfo:
                             params = ret[0]
                     else:
                         # новый домен найденный в content
-                        dom.run_test(tested_url, True)
+                        new_params = dom.run_test(tested_url, True)
+                        if self.domain.split('.')[-2] == dom.domain.split('.')[-2]:
+                            debug(f'*** [{self.domain}] {params} -- [{dom.domain}] {new_params}')
+
 
             return params
 
@@ -733,6 +737,7 @@ USER_RULES_FILE = Path(USER_RULES_FILE) # в текущем каталоге
 DIRECT_FILE = CACHE_DIR / DIRECT_FILE
 FAILED_FILE = CACHE_DIR / FAILED_FILE
 HISTORY_FILE = CACHE_DIR / HISTORY_FILE
+URLS_FILE = CACHE_DIR / URLS_FILE
 
 def _load(filename, status, rules=False):
     if not filename.is_file(): # проверяем существование файла
@@ -778,6 +783,15 @@ def load_rules():
             dom = domain_registry.get(domain)
             if dom:
                 dom.history_params = params
+    # загружаем urls
+    if not URLS_FILE.is_file():
+        return
+    for url in URLS_FILE.open(encoding='utf-8'):
+        url = url.rstrip('\r\n')
+        parsed_url = urlparse(url)
+        dom = domain_registry.get(parsed_url.hostname)
+        if dom:
+            dom.urls.add(url)
 
 
 def save_rules():
@@ -792,21 +806,24 @@ def save_rules():
                 bak_file = fn.with_suffix(fn.suffix + '.bak')
                 fn.replace(bak_file)
     # Записываем данные
-    with (RULES_FILE.open('w', encoding='utf-8') as f,
+    with (RULES_FILE.open('w', encoding='utf-8') as r,
           DIRECT_FILE.open('w', encoding='utf-8') as d,
-          FAILED_FILE.open('w', encoding='utf-8') as e,
-          HISTORY_FILE.open('w', encoding='utf-8') as h):
+          FAILED_FILE.open('w', encoding='utf-8') as f,
+          HISTORY_FILE.open('w', encoding='utf-8') as h,
+          URLS_FILE.open('w', encoding='utf-8') as u):
         for dom in domain_registry.values():
             if dom.status == 'PROXY':
                 if not dom.user_config:
                     # игнорируем пользовательские стратегии
-                    print(f'{dom.domain} {dom.test_time} {dom.params}', file=f)
+                    print(f'{dom.domain} {dom.test_time} {dom.params}', file=r)
             elif dom.status == 'DIRECT':
                 print(f'{dom.domain} {dom.test_time}', file=d)
             else: # FAILED
-                print(f'{dom.domain} {dom.test_time}', file=e)
+                print(f'{dom.domain} {dom.test_time}', file=f)
             if dom.history_params:
                 print(f'{dom.domain} {"|".join(dom.history_params)}', file=h)
+            for url in dom.urls:
+                print(url, file=u)
 
 def load_strategies():
     global strategies
