@@ -50,8 +50,8 @@ CONFIG_FILE = 'amproxy.ini'
 BLACKLIST_FILE = 'blacklist.txt'
 # каталог для кэша
 CACHE_DIR = 'cache'
-DIRECT_TEST_TIMEOUT = 3 # таймаут для проверки доступности (секунды)
-PROXY_TEST_TIMEOUT = 2 # таймаут для поиска стратегии
+DIRECT_TEST_TIMEOUT = 4 # таймаут для проверки доступности (секунды)
+PROXY_TEST_TIMEOUT = 4 # таймаут для поиска стратегии
 CURL_THREAD_LIMIT = 8 # сколько потоков использовать для проверки стратегий
 DIRECT_HTTP_METHOD = 'get' # GET/HEAD какой метод http использовать
 NUMBER_OF_TESTS = 2 # количество проверок прямой доступности и каждой стратегии
@@ -147,8 +147,8 @@ def setup_logging():
     global print_exc
     print_exc = logger.exception
     # отключить вывод asyncio и curl_cffi
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    #logging.getLogger("curl_cffi").setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
+    #logging.getLogger('curl_cffi').setLevel(logging.WARNING)
 
     return listener
 
@@ -170,7 +170,7 @@ def regsig():
         # В Windows SIGUSR1 нет, используем SIGBREAK (Ctrl+Break)
         signal.signal(signal.SIGBREAK, print_status)
     else:
-        # В Linux/macOS используем SIGUSR1 (kill -USR1 PID)
+        # В Linux/MacOS используем SIGUSR1 (kill -USR1 PID)
         signal.signal(signal.SIGUSR1, print_status)
 
 def print_ciadpi_status():
@@ -228,21 +228,22 @@ def print_summary():
     info('ДОБАВЛЕНЫ ДОМЕНЫ ЗА ЭТОТ СЕАНС')
     info('='*50)
     for s in summary:
-        if summary[s]:
-            if s == 'UPDATE':
-                info('Обновлены:')
-                info('\n'.join(f'  {i}' for i in summary[s]))
-            elif s == 'PROXY':
-                info('В категорию PROXY добавлены:')
-                for d in summary[s]:
-                    dom = domain_registry.get(d)
-                    if dom is not None:
-                        info(f'  {d} ({dom.params})')
-                    else:
-                        info(f'  {d} (не зарегистрирован)')
-            else:
-                info(f'В категорию {s} добавлены:')
-                info('\n'.join(f'  {i}' for i in summary[s]))
+        if not summary[s]:
+            continue
+        if s == 'UPDATE':
+            info('Обновлены:')
+            info('\n'.join(f'  {i}' for i in summary[s]))
+        elif s == 'PROXY':
+            info('В категорию PROXY добавлены:')
+            for d in summary[s]:
+                dom = domain_registry.get(d)
+                if dom is not None:
+                    info(f'  {d} ({dom.params})')
+                else:
+                    info(f'  {d} (не зарегистрирован)')
+        else:
+            info(f'В категорию {s} добавлены:')
+            info('\n'.join(f'  {i}' for i in summary[s]))
     info('')
 
 # </DEBUG>
@@ -263,6 +264,7 @@ class DomainInfo:
         self.params = params
         self.history_params = []  # Список стратегий, которые работали раньше
         self.user_config = user_config # Стратегия задана пользователем
+        self.urls = set()
         self.lock = threading.Lock() # чтобы не запускать несколько run_test одновременно
         self.semaphore_16k = asyncio.Semaphore(10)
 
@@ -301,7 +303,6 @@ class DomainInfo:
             return self.params
         return None
 
-
     def _check_error(self, e):
         # Проверяем Exception
         # Возвращает True/False
@@ -324,7 +325,6 @@ class DomainInfo:
             # если alert decode error, alert handshake failure
             # значит стратегия портит данные
         return False
-
 
     def _try_dns(self):
         # Проверка DNS
@@ -368,7 +368,6 @@ class DomainInfo:
         except Exception:
             return False
 
-
     def _test_strategies(self, url):
         # Подбор стратегии через ciadpi
         # Возвращает (params, content) или 'DIRECT'
@@ -409,27 +408,26 @@ class DomainInfo:
         self._update('FAILED')
         return 'DIRECT'
 
-
     async def _test_params(self, url, params, semaphore, found_event):
         # Проверка одной стратегии
         # Возвращает (params, content) или None
         async with semaphore:
             if found_event.is_set():
                 return None
-
             port = get_free_port()
             args = params.split()
-            # Запускаем ciadpi (не используем run_ciadpi потому что async)
-            proc = await asyncio.create_subprocess_exec(
-                CIADPI_EXE, '-i', '127.0.0.1', '-p', str(port), *args,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await asyncio.sleep(0.4) # Пауза на инициализацию прокси
-            if proc.returncode is not None:
-                # proc.poll() отсутствует
-                return None
+            proc = None
             try:
+                # Запускаем ciadpi (не используем run_ciadpi потому что async)
+                proc = await asyncio.create_subprocess_exec(
+                    CIADPI_EXE, '-i', '127.0.0.1', '-p', str(port), *args,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                await asyncio.sleep(0.4) # Пауза на инициализацию прокси
+                if proc.returncode is not None:
+                    # proc.poll() отсутствует
+                    return None
                 proxy_url = f'socks5h://127.0.0.1:{port}'
                 proxies = {'http': proxy_url, 'https': proxy_url}
                 # Пытаемся проверить конфиг NUMBER_OF_TESTS раз
@@ -444,7 +442,6 @@ class DomainInfo:
                                 impersonate=IMPERSONATE,
                                 timeout=PROXY_TEST_TIMEOUT,
                             )
-
                             # Успех. Ставим флаг для всех остальных
                             found_event.set()
                             return (params, response.content)
@@ -459,11 +456,13 @@ class DomainInfo:
                     await asyncio.sleep(0.5)
             finally:
                 # Корректно завершаем ciadpi в любом случае
-                if proc.returncode is None:
-                    proc.terminate()
-                    await proc.wait()
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        await proc.wait()
+                    except:
+                        pass
         return None
-
 
     async def _check_blocked(self, session, url):
         # Скачиваем страницу по ссылке и проверяем на доступность
@@ -479,9 +478,8 @@ class DomainInfo:
         return None
 
     async def _scan_page(self, content, target_url, proxies, max_duration=10):
-        # Парсим content, находим ссылки на сторонние
-        # домены и проверяем их на доступность
-        # Возвращает отсортированный по размеру список пар (url, size)
+        # Парсим content, находим ссылки и проверяем их на доступность
+        # Возвращает список url
         soup = BeautifulSoup(content, 'html.parser')
         # Собираем картинки, скрипты и стили
         tags_config = {
@@ -490,16 +488,14 @@ class DomainInfo:
             'script': ['src'],
             'link': ['href']
         }
-
         urls = set()
         for tag_name, attrs in tags_config.items():
             for tag in soup.find_all(tag_name):
                 # Фильтр для <link>: только стили и иконки
                 if tag_name == 'link':
                     rel = tag.get('rel', [])
-                    if not any(r in (rel if isinstance(rel, list) else [rel]) 
-                               for r in ['stylesheet', 'icon', 'preload',
-                                         'shortcut icon']):
+                    if not any(r in rel for r in ['stylesheet', 'icon',
+                                                  'preload', 'shortcut icon']):
                         continue
 
                 for attr in attrs:
@@ -522,13 +518,13 @@ class DomainInfo:
                                 max_clients=20) as session:
             tasks = [self._check_blocked(session, url) for url in urls]
             try:
-                # Четкий лимит на всю проверку
+                # лимит на всю проверку
                 for coro in asyncio.as_completed(tasks, timeout=max_duration):
                     result = await coro
                     if result:
                         found_results.append(result)
             except asyncio.TimeoutError:
-                debug(f'лимит {max_duration}с исчерпан. Возвращаем найденное.')
+                debug(f'лимит {max_duration} сек исчерпан. Возвращаем найденное')
 
         debug(f'найдено {len(found_results)} заблокированных ресурсов')
         return found_results
@@ -561,7 +557,7 @@ class DomainInfo:
 
         return result
 
-
+    # *Основная функция*
     def run_test(self, target_url, related=False):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
@@ -587,6 +583,7 @@ class DomainInfo:
                 info(f'[X] {self.domain} ошибка при получении DNS')
                 self._update('FAILED')
                 return 'DIRECT'
+
             # Проверяем доступность сервера
             parsed_url = urlparse(target_url)
             port = int(parsed_url.port or (80 if parsed_url.scheme == 'http' else 443))
@@ -595,7 +592,6 @@ class DomainInfo:
                 info(f'[X] {self.domain} ошибка подключения к серверу')
                 self._update('FAILED')
                 return 'DIRECT'
-            ret = None
             # Проверяем http
             for _ in range(NUMBER_OF_TESTS):
                 if self._try_http(target_url):
@@ -603,14 +599,12 @@ class DomainInfo:
                     self._update('DIRECT')
                     return 'DIRECT' # не проверять незаблокированные домены
 
-
-            if not ret:
-                # проверка http не пройдена
-                ret = self._test_strategies(target_url)
-                if ret == 'DIRECT':
-                    info(f'[X] {self.domain} стратегия не найдена')
-                    self._update('FAILED')
-                    return 'DIRECT'
+            # проверка http не пройдена
+            ret = self._test_strategies(target_url)
+            if ret == 'DIRECT':
+                info(f'[X] {self.domain} стратегия не найдена')
+                self._update('FAILED')
+                return 'DIRECT'
 
             if related:
                 # идет проверка встроенных в страницу ссылок (не создаем рекурсию)
@@ -633,9 +627,10 @@ class DomainInfo:
             for tested_url in rel_list:
                 parsed_url = urlparse(tested_url)
                 host = parsed_url.hostname
+                dom = get_domain_info(host)
+                dom.urls.add((params, tested_url))
                 if host not in tested_hosts:
                     tested_hosts.append(host)
-                    dom = get_domain_info(host)
                     if dom is self:
                         # перепроверяем стратегию на ссылках из content
                         debug(f'перепроверка: {tested_url}')
@@ -645,7 +640,6 @@ class DomainInfo:
                                   f'для {host} будут недоступны большие файлы')
                         else:
                             params = ret[0]
-                            debug(f'{params} || {self.params}')
                     else:
                         # новый домен найденный в content
                         dom.run_test(tested_url, True)
@@ -727,6 +721,7 @@ def get_domain_info(domain):
         return domain_registry[domain]
 
 # <DOMAINREGISTRY/>
+
 
 # <LOAD_RULES/SAVE_RULES>
 # Загрузка/сохранение кэша
@@ -889,14 +884,18 @@ def ensure_ciadpi(port, params):
 
 
 # <SERVER>
-def pipe(source, destination):
-    # Пересылает данные между сокетами до закрытия одного из них.
+def pipe(source, destination, dom):
+    # Пересылает данные между сокетами до закрытия одного из них
     try:
         while True:
             data = source.recv(8192)
             if not data:
                 break
             destination.sendall(data)
+    except TimeoutError:
+        # ловим таймаут
+        if dom.status == 'PROXY':
+            debug(f'Timeout: {dom.domain} {dom.params} {len(dom.urls)}')
     except Exception as err:
         pass
     finally:
@@ -983,11 +982,11 @@ def handle_client(client_socket):
             remote_socket.sendall(request)
 
         # Двунаправленная пересылка
-        th = threading.Thread(target=pipe, args=(client_socket, remote_socket))
+        th = threading.Thread(target=pipe, args=(client_socket, remote_socket, dom))
         th.daemon = True
         th.start()
         # Основной поток обрабатывает обратное направление
-        pipe(remote_socket, client_socket)
+        pipe(remote_socket, client_socket, dom)
 
     except Exception as err:
         print_exc(str(err))
