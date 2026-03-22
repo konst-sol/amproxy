@@ -645,7 +645,10 @@ class DomainInfo:
                         # новый домен найденный в content
                         new_params = dom.run_test(tested_url, True)
                         if self.domain.split('.')[-2] == dom.domain.split('.')[-2]:
-                            debug(f'*** [{self.domain}] {params} -- [{dom.domain}] {new_params}')
+                            # проверяем домен второго уровня
+                            debug(f'замена: [{self.domain}] {params} -- [{dom.domain}] {new_params}')
+                            params = new_params
+                            self._update('PROXY', params)
 
 
             return params
