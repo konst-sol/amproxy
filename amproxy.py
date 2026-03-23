@@ -336,7 +336,7 @@ class DomainInfo:
             debug(f'[OK] {self.domain} IP: {ip}')
             return ip
         except socket.gaierror:
-            debug('[BLOCK] {self.domain} Не удалось разрешить имя. Используйте DoH')
+            debug(f'[BLOCK] {self.domain} Не удалось разрешить имя. Используйте DoH')
             return None
 
     def _try_tcp(self, ip, port):
@@ -478,27 +478,21 @@ class DomainInfo:
                 pass
         return None
 
-    async def _scan_page(self, content, target_url, proxies, max_duration=30):
+    async def _scan_page(self, content, target_url, proxies, max_duration=20):
         # Парсим content, находим ссылки и проверяем их на доступность
         # Возвращает список url
         soup = BeautifulSoup(content, 'html.parser')
         # Собираем картинки, скрипты и стили
         tags_config = {
+            #'a': ['href'],
             'img': ['src', 'data-src', 'data-lazy-src'],
             'source': ['src', 'srcset'],
             'script': ['src'],
             'link': ['href']
         }
-        urls = set()
+        urls = []
         for tag_name, attrs in tags_config.items():
             for tag in soup.find_all(tag_name):
-                # Фильтр для <link>: только стили и иконки
-                if tag_name == 'link':
-                    rel = tag.get('rel', [])
-                    if not any(r in rel for r in ['stylesheet', 'icon',
-                                                  'preload', 'shortcut icon']):
-                        continue
-
                 for attr in attrs:
                     val = tag.get(attr)
                     if not val: continue
@@ -511,7 +505,17 @@ class DomainInfo:
                         if (clean_item and
                             not clean_item.startswith(('data:', 'blob:'))):
                             url = urljoin(target_url, clean_item)
-                            urls.add(url)
+                            if url not in urls: urls.append(url)
+
+        if 0: # [!!] с добавлением <a> работает сильно хуже
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                # Формируем полный путь
+                # Если href уже абсолютный, urljoin его не изменит
+                url = urljoin(target_url, href)
+                # Фильтруем только http/https (отсекаем почту, якоря и js)
+                if url.startswith(('http://', 'https://')):
+                    if url not in urls: urls.append(url)
 
         debug(f'проверка {len(urls)} ресурсов на блокировку...')
         found_results = []
@@ -563,15 +567,16 @@ class DomainInfo:
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
         # Если related == True - проверяется ссылка из тестируемой страницы
+        debug(f'{self.domain} - {target_url} - {related}')
         res = self.check_expired()
-        if res is not None:
+        if not related and res is not None:
             info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
             return res
 
         with self.lock:
             # Double-check: вдруг кто-то уже проверил, пока мы ждали замок
             res = self.check_expired()
-            if res is not None:
+            if not related and res is not None:
                 info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
                 return res
 
@@ -625,31 +630,34 @@ class DomainInfo:
             # может быть блокировка 16 KB
             rel_list = asyncio.run(self._scan_page(content, target_url, proxies))
             tested_hosts = []
+            threads = []
             for tested_url in rel_list:
                 parsed_url = urlparse(tested_url)
                 host = parsed_url.hostname
                 dom = get_domain_info(host)
                 dom.urls.add(tested_url)
-                if host not in tested_hosts:
-                    tested_hosts.append(host)
-                    if dom is self:
-                        # перепроверяем стратегию на ссылках из content
-                        debug(f'перепроверка: {tested_url}')
-                        ret = self._test_strategies(tested_url)
-                        if ret == 'DIRECT':
-                            debug('стратегия для обхода 16к не найдена. '
-                                  f'для {host} будут недоступны большие файлы')
-                        else:
-                            params = ret[0]
+                if host in tested_hosts:
+                    continue
+                tested_hosts.append(host)
+                if dom is self:
+                    # перепроверяем стратегию на ссылках из content
+                    debug(f'перепроверка: {tested_url}')
+                    ret = self._test_strategies(tested_url)
+                    if ret == 'DIRECT':
+                        debug('стратегия для обхода 16к не найдена. '
+                              f'для {host} будут недоступны большие файлы')
                     else:
-                        # новый домен найденный в content
-                        new_params = dom.run_test(tested_url, True)
-                        if self.domain.split('.')[-2] == dom.domain.split('.')[-2]:
-                            # проверяем домен второго уровня
-                            debug(f'замена: [{self.domain}] {params} -- [{dom.domain}] {new_params}')
-                            params = new_params
-                            self._update('PROXY', params)
+                        params = ret[0]
+                else:
+                    # новый домен найденный в content
+                    # один поток для одного домена
+                    th = threading.Thread(target=dom.run_test, args=(tested_url, True))
+                    th.daemon = True
+                    th.start()
+                    threads.append(th)
 
+            for th in threads:
+                th.join()
 
             return params
 
@@ -1083,7 +1091,7 @@ def test16():
     info('\nНайдены стратегии:')
     for domain in domain_registry:
         dom = domain_registry[domain]
-        info(f'{domain} {dom.params or "DIRECT"}')
+        info(f'{domain} {dom.params or dom.status}')
 
     listener.stop()
     print('\ntime:', timedelta(seconds=int(time.time()-start_time)))
