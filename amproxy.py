@@ -51,10 +51,10 @@ CONFIG_FILE = 'amproxy.ini'
 BLACKLIST_FILE = 'blacklist.txt'
 # каталог для кэша
 CACHE_DIR = 'cache'
-DIRECT_TEST_TIMEOUT = 4 # таймаут для проверки доступности (секунды)
-PROXY_TEST_TIMEOUT = 4 # таймаут для поиска стратегии
-CURL_THREAD_LIMIT = 8 # сколько потоков использовать для проверки стратегий
-DIRECT_HTTP_METHOD = 'get' # GET/HEAD какой метод http использовать
+DIRECT_TEST_TIMEOUT = 4. # таймаут для проверки доступности (секунды)
+PROXY_TEST_TIMEOUT = 5. # таймаут для поиска стратегии
+SCAN_PAGE_TIMEOUT = 20. # общее время обработки страницы при поиске стратегии
+CURL_THREAD_LIMIT = 10. # сколько потоков использовать для проверки стратегий
 NUMBER_OF_TESTS = 2 # количество проверок прямой доступности и каждой стратегии
 # время устаревания разных статусов в часах:
 DIRECT_TTL = 7*24 # прямое подключение
@@ -78,7 +78,7 @@ for section in config.sections():
         current_value = globals()[var_name]
         # Сохраняем тип дефолтной переменной (int, str)
         target_type = type(current_value)
-        if target_type not in (int, str):
+        if target_type not in (int, float, str):
             # Переназначаем только переменные int и str
             print(f'Неизвестная опция в конфиг-файле: {key}')
             continue
@@ -267,8 +267,6 @@ class DomainInfo:
         self.user_config = user_config # Стратегия задана пользователем
         self.urls = set()
         self.lock = threading.Lock() # чтобы не запускать несколько run_test одновременно
-        self.semaphore_16k = asyncio.Semaphore(10)
-
 
     def _update(self, status, params=None):
         # Обновляем status, params и test_time
@@ -287,7 +285,6 @@ class DomainInfo:
         if not self.user_config:
             # не обновляем если пользовательская стратегия
             self.test_time = int(time.time())
-
 
     def check_expired(self):
         # Возвращает None если требуется проверка
@@ -336,7 +333,7 @@ class DomainInfo:
             debug(f'[OK] {self.domain} IP: {ip}')
             return ip
         except socket.gaierror:
-            debug(f'[BLOCK] {self.domain} Не удалось разрешить имя. Используйте DoH')
+            debug(f'[BLOCK] {self.domain} Не удалось разрешить имя. Используйте DoT/DoH')
             return None
 
     def _try_tcp(self, ip, port):
@@ -359,17 +356,14 @@ class DomainInfo:
             kw = {'impersonate': IMPERSONATE,
                   'timeout': DIRECT_TEST_TIMEOUT,
                   'verify': False}
-            if DIRECT_HTTP_METHOD.lower() == 'get':
-                response = requests.get(url, **kw)
-            else:
-                response = requests.head(url, **kw)
+            response = requests.get(url, **kw)
             return response.status_code is not None
         except (CurlError, RequestException) as err:
             return self._check_error(err)
         except Exception:
             return False
 
-    def _test_strategies(self, url):
+    def _test_strategies(self, url, update=True):
         # Подбор стратегии через ciadpi
         # Возвращает (params, content) или 'DIRECT'
         info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
@@ -390,7 +384,7 @@ class DomainInfo:
         # Предварительная проверка
         res = asyncio.run(self._find_working_params(url, pre_strats))
         if res:
-            self._update('PROXY', res[0])
+            if update: self._update('PROXY', res[0])
             debug(f'найдена стратегия для {self.domain}: {res[0]}')
             return res
         # Если история не помогла — запускаем поиск
@@ -402,11 +396,11 @@ class DomainInfo:
         debug(f'Проверка остальных {len(remaining_strats)} стратегий')
         res = asyncio.run(self._find_working_params(url, remaining_strats))
         if res:
-            self._update('PROXY', res[0])
+            if update: self._update('PROXY', res[0])
             debug(f'найдена стратегия для {self.domain}: {res[0]}')
             return res
         # подбор параметров закончился неудачей - соединяем напрямую
-        self._update('FAILED')
+        if update: self._update('FAILED')
         return 'DIRECT'
 
     async def _test_params(self, url, params, semaphore, found_event):
@@ -449,7 +443,7 @@ class DomainInfo:
                     except (CurlError, RequestException) as err:
                         if self._check_error(err):
                             found_event.set()
-                            return (params, '') # FIXME
+                            return (params, '')
                     except Exception:
                         # Если попытка не удалась, просто пробуем следующую
                         pass
@@ -465,20 +459,38 @@ class DomainInfo:
                         pass
         return None
 
-    async def _check_blocked(self, session, url):
+    async def _check_blocked(self, url, proxies, semaphore):
         # Скачиваем страницу по ссылке и проверяем на доступность
         # Возвращает url (страница не доступна) или None
-        async with self.semaphore_16k:  # Ждем разрешения на выполнение запроса
-            try:
-                res = await session.get(url, timeout=3)
-            except CurlError:
-                # страница заблокирована
-                return url
-            except Exception:
-                pass
+
+        # для подсчета размера скачаного
+        downloaded_bytes = 0
+        def count_bytes(chunk):
+            nonlocal downloaded_bytes
+            downloaded_bytes += len(chunk)
+
+        async with semaphore:  # Ждем разрешения на выполнение запроса
+            async with requests.AsyncSession() as s:
+                try:
+                    res = await s.get(
+                        url,
+                        proxies=proxies,
+                        impersonate=IMPERSONATE,
+                        content_callback=count_bytes,
+                        timeout=PROXY_TEST_TIMEOUT,
+                        allow_redirects=False,
+                    )
+                except CurlError as err:
+                    # страница заблокирована
+                    # 28 - Operation timed out
+                    if err.code == 28 and downloaded_bytes > 0:
+                        return url
+                except Exception as err:
+                    pass
         return None
 
-    async def _scan_page(self, content, target_url, proxies, max_duration=20):
+    async def _scan_page(self, content, target_url, proxies,
+                         max_duration=SCAN_PAGE_TIMEOUT):
         # Парсим content, находим ссылки и проверяем их на доступность
         # Возвращает список url
         soup = BeautifulSoup(content, 'html.parser')
@@ -507,29 +519,32 @@ class DomainInfo:
                             url = urljoin(target_url, clean_item)
                             if url not in urls: urls.append(url)
 
-        if 0: # [!!] с добавлением <a> работает сильно хуже
+        if 1: # [!!] с добавлением <a> работает сильно хуже (ограничить кол-во ссылок)
+            num = 0
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 # Формируем полный путь
                 # Если href уже абсолютный, urljoin его не изменит
                 url = urljoin(target_url, href)
                 # Фильтруем только http/https (отсекаем почту, якоря и js)
-                if url.startswith(('http://', 'https://')):
-                    if url not in urls: urls.append(url)
+                if url.startswith(('http://', 'https://')) and url not in urls:
+                    urls.append(url)
+                    num += 1
+                    if num >= 10: #len(urls) >= 30:
+                        break
 
         debug(f'проверка {len(urls)} ресурсов на блокировку...')
         found_results = []
-        async with AsyncSession(impersonate=IMPERSONATE, proxies=proxies,
-                                max_clients=20) as session:
-            tasks = [self._check_blocked(session, url) for url in urls]
-            try:
-                # лимит на всю проверку
-                for coro in asyncio.as_completed(tasks, timeout=max_duration):
-                    result = await coro
-                    if result:
-                        found_results.append(result)
-            except asyncio.TimeoutError:
-                debug(f'лимит {max_duration} сек исчерпан. Возвращаем найденное')
+        semaphore = asyncio.Semaphore(CURL_THREAD_LIMIT)
+        tasks = [self._check_blocked(url, proxies, semaphore) for url in urls]
+        try:
+            # лимит на всю проверку
+            for coro in asyncio.as_completed(tasks, timeout=max_duration):
+                result = await coro
+                if result:
+                    found_results.append(result)
+        except asyncio.TimeoutError:
+            debug(f'лимит {max_duration} сек исчерпан. Возвращаем найденное')
 
         debug(f'найдено {len(found_results)} заблокированных ресурсов')
         return found_results
@@ -638,19 +653,24 @@ class DomainInfo:
                 dom.urls.add(tested_url)
                 if host in tested_hosts:
                     continue
-                tested_hosts.append(host)
                 if dom is self:
                     # перепроверяем стратегию на ссылках из content
                     debug(f'перепроверка: {tested_url}')
-                    ret = self._test_strategies(tested_url)
+                    ret = self._test_strategies(tested_url, update=False)
                     if ret == 'DIRECT':
                         debug('стратегия для обхода 16к не найдена. '
                               f'для {host} будут недоступны большие файлы')
+                        continue
                     else:
+                        if ret[0] == params:
+                            continue
+                        tested_hosts.append(host)
                         params = ret[0]
+                        self._update('PROXY', params)
                 else:
                     # новый домен найденный в content
                     # один поток для одного домена
+                    tested_hosts.append(host)
                     th = threading.Thread(target=dom.run_test, args=(tested_url, True))
                     th.daemon = True
                     th.start()
