@@ -26,8 +26,10 @@ import logging, logging.handlers
 from logging import debug, info, error
 import queue
 import signal
+# аргументы ком. строки
+from argparse import ArgumentParser
 # конфиг-файл
-import configparser
+from configparser import ConfigParser
 
 # <НАСТРОЙКИ>
 # дефолтные
@@ -61,33 +63,68 @@ DIRECT_TTL = 7*24 # прямое подключение
 PROXY_TTL = 7*24 # подключение через ciadpi
 FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
 LOG_LEVEL = 'INFO' # ERROR/INFO/DEBUG
-LOG_FILE = sys.argv[0].split('.')[0]+'.log'
+LOG_FILE = 'amproxy.log'
 # </НАСТРОЙКИ>
 
+# <CLI>
+args_parser = ArgumentParser() #description='Описание скрипта'
+args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
+args_parser.add_argument('-c', '--config', help='конфиг-файл')
+# дополнительный необязательный аргумент
+group = args_parser.add_mutually_exclusive_group()
+group.add_argument('domain', nargs='?', help='домен для тестирования')
+
+command_line_args = args_parser.parse_args()
+config_section = None
+if command_line_args.section:
+    config_section = command_line_args.section
+    print(f'Используется раздел конфиг-файла: {config_section}')
+if command_line_args.config:
+    if os.path.exists(command_line_args.config):
+        CONFIG_FILE = command_line_args.config
+        print(f'Используется конфиг-файл: {CONFIG_FILE}')
+    else:
+        print(f'Конфиг-файл {command_line_args.config} не найден')
+
+# </CLI>
+
 # <CONFIG_FILE>
+def _set_config_value(key, value):
+    # устанавливаем глобальные переменные из конфига
+    var_name = key.upper()
+    # Проверяем существует ли уже такая переменная в глобальном пространстве
+    if var_name not in globals():
+        print(f'Неизвестная опция в конфиг-файле: {key}')
+        return
+    current_value = globals()[var_name]
+    # Сохраняем тип дефолтной переменной (int, float, str)
+    target_type = type(current_value)
+    if target_type not in (int, float, str):
+        # Переназначаем только переменные int, float и str
+        print(f'Неизвестная опция в конфиг-файле: {key}')
+        return
+    try:
+        # Пытаемся привести строку из конфига к типу дефолта
+        globals()[var_name] = target_type(value)
+    except ValueError:
+        print(f'Не удалось преобразовать {var_name} в {target_type}')
+
 # Считываем конфиг-файл
-config = configparser.ConfigParser()
+config = ConfigParser()
 config.read(CONFIG_FILE)
-for section in config.sections():
-    for key, value in config.items(section):
-        var_name = key.upper()
-        # Проверяем существует ли уже такая переменная в глобальном пространстве
-        if var_name not in globals():
-            print(f'Неизвестная опция в конфиг-файле: {key}')
-            continue
-        current_value = globals()[var_name]
-        # Сохраняем тип дефолтной переменной (int, str)
-        target_type = type(current_value)
-        if target_type not in (int, float, str):
-            # Переназначаем только переменные int и str
-            print(f'Неизвестная опция в конфиг-файле: {key}')
-            continue
-        try:
-            # Пытаемся привести строку из конфига к типу дефолта
-            globals()[var_name] = target_type(value)
-        except ValueError:
-            print(f'Не удалось преобразовать {var_name} в {target_type}')
-# <CONFIG_FILE/>
+# Считываем из раздела [DEFAULT]
+# (По умолчанию имена разделов чувствительны к регистру)
+for key, value in config.defaults().items():
+    _set_config_value(key, value)
+# считываем из раздела, указанного в ком. строке (-s <раздел>)
+if config_section:
+    if config.has_section(config_section):
+        for key, value in config.items(config_section):
+            _set_config_value(key, value)
+    else:
+        print(f'Раздел {config_section} не найден')
+
+# </CONFIG_FILE>
 
 # <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 strategies = [] # список тестируемых стратегий
@@ -150,7 +187,6 @@ def setup_logging():
     # отключить вывод asyncio и curl_cffi
     logging.getLogger('asyncio').setLevel(logging.WARNING)
     #logging.getLogger('curl_cffi').setLevel(logging.WARNING)
-
     return listener
 
 # Вывод статуса ciadpi, статистики использования стратегий
@@ -158,12 +194,9 @@ def setup_logging():
 # по Ctrl+Break / kill -USR1 <PID> (pkill -USR1 -f amproxy.py)
 def print_status(signum, frame):
     # Функция-обработчик сигнала для вывода информации
-    try:
-        print_ciadpi_status()
-        print_params_stat()
-        print_summary()
-    except Exception as err:
-        print_exc(str(err))
+    print_ciadpi_status()
+    print_params_stat()
+    print_summary()
 
 # Регистрация обработчика
 def regsig():
@@ -763,7 +796,6 @@ def get_domain_info(domain):
 # Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
 RULES_FILE = CACHE_DIR / RULES_FILE
-#USER_RULES_FILE = CACHE_DIR / USER_RULES_FILE # в подкаталоге CACHE_DIR
 USER_RULES_FILE = Path(USER_RULES_FILE) # в текущем каталоге
 DIRECT_FILE = CACHE_DIR / DIRECT_FILE
 FAILED_FILE = CACHE_DIR / FAILED_FILE
@@ -824,7 +856,6 @@ def load_rules():
         if dom:
             dom.urls.add(url)
 
-
 def save_rules():
     debug('сохранение правил')
     # Создаем CACHE_DIR, если его еще нет
@@ -869,7 +900,7 @@ def load_strategies():
             if s and s not in strategies: strategies.append(s)
     info(f'[+] Загружено {len(strategies)} стратегий')
 
-# <LOAD_RULES/SAVE_RULES/>
+# </LOAD_RULES/SAVE_RULES>
 
 params_to_port_lock = threading.Lock()
 def get_params_to_port(params):
@@ -1094,13 +1125,14 @@ def start_proxy():
 
 # <SERVER/>
 
-def test16():
+# поиск стратегии для одного домена
+# кэш не загружается и не сохраняется
+def test16(host):
     start_time = time.time()
     listener = setup_logging()
     # загрузка стратегий
     load_strategies()
 
-    host = sys.argv[1]
     dom = get_domain_info(host)
     try:
         res = dom.run_test(f'https://{host}')
@@ -1117,9 +1149,9 @@ def test16():
     print('\ntime:', timedelta(seconds=int(time.time()-start_time)))
 
 #
-if __name__ == "__main__":
-    if sys.argv[1:]:
-        test16()
+if __name__ == '__main__':
+    if command_line_args.domain:
+        test16(command_line_args.domain)
     else:
         start_proxy()
 
