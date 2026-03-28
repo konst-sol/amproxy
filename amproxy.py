@@ -56,8 +56,12 @@ CACHE_DIR = 'cache'
 DIRECT_TEST_TIMEOUT = 4. # таймаут для проверки доступности (секунды)
 PROXY_TEST_TIMEOUT = 5. # таймаут для поиска стратегии
 SCAN_PAGE_TIMEOUT = 20. # общее время обработки страницы при поиске стратегии
-CURL_THREAD_LIMIT = 10. # сколько потоков использовать для проверки стратегий
+CURL_THREAD_LIMIT = 10 # сколько потоков использовать для проверки стратегий
 NUMBER_OF_TESTS = 2 # количество проверок прямой доступности и каждой стратегии
+# EXTERN для user-rules.txt
+EXTERN_PROTO = 3 # socks.SOCKS4=1 / socks.SOCKS5=2 / socks.HTTP=3
+EXTERN_HOST = '127.0.0.1'
+EXTERN_PORT = 8080
 # время устаревания разных статусов в часах:
 DIRECT_TTL = 7*24 # прямое подключение
 PROXY_TTL = 7*24 # подключение через ciadpi
@@ -78,13 +82,13 @@ command_line_args = args_parser.parse_args()
 config_section = None
 if command_line_args.section:
     config_section = command_line_args.section
-    print(f'Используется раздел конфиг-файла: {config_section}')
+    print(f'[C] Используется раздел конфиг-файла: {config_section}')
 if command_line_args.config:
     if os.path.exists(command_line_args.config):
         CONFIG_FILE = command_line_args.config
-        print(f'Используется конфиг-файл: {CONFIG_FILE}')
+        print(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
     else:
-        print(f'Конфиг-файл {command_line_args.config} не найден')
+        print(f'[C] Конфиг-файл {command_line_args.config} не найден')
 
 # </CLI>
 
@@ -94,20 +98,21 @@ def _set_config_value(key, value):
     var_name = key.upper()
     # Проверяем существует ли уже такая переменная в глобальном пространстве
     if var_name not in globals():
-        print(f'Неизвестная опция в конфиг-файле: {key}')
+        print(f'[C] Неизвестная опция в конфиг-файле: {key}')
         return
     current_value = globals()[var_name]
     # Сохраняем тип дефолтной переменной (int, float, str)
     target_type = type(current_value)
     if target_type not in (int, float, str):
         # Переназначаем только переменные int, float и str
-        print(f'Неизвестная опция в конфиг-файле: {key}')
+        print(f'[C] Неизвестная опция в конфиг-файле: {key}')
         return
     try:
         # Пытаемся привести строку из конфига к типу дефолта
         globals()[var_name] = target_type(value)
+        print(f'[C] {var_name}: {value}')
     except ValueError:
-        print(f'Не удалось преобразовать {var_name} в {target_type}')
+        print(f'[C] Не удалось преобразовать {var_name} в {target_type.__name__}')
 
 # Считываем конфиг-файл
 config = ConfigParser()
@@ -122,7 +127,7 @@ if config_section:
         for key, value in config.items(config_section):
             _set_config_value(key, value)
     else:
-        print(f'Раздел {config_section} не найден')
+        print(f'[C] Раздел {config_section} не найден')
 
 # </CONFIG_FILE>
 
@@ -817,8 +822,8 @@ def _load(filename, status, rules=False):
             elif status == 'USER':
                 # USER_RULES_FILE
                 domain, params = s.split(maxsplit=1)
-                if params == 'DIRECT':
-                    dom = DomainInfo(domain, 'DIRECT', user_config=True)
+                if params in ('DIRECT', 'EXTERN'):
+                    dom = DomainInfo(domain, params, user_config=True)
                 else:
                     dom = DomainInfo(domain, 'PROXY', params, user_config=True)
             else:
@@ -890,7 +895,7 @@ def save_rules():
 def load_strategies():
     global strategies
     if not os.path.exists(STRATEGIES_FILE):
-        info(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+        error(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
         sys.exit()
     # загрузка стратегий
     with open(STRATEGIES_FILE) as f:
@@ -1024,19 +1029,25 @@ def handle_client(client_socket):
             debug(f'{host} [BLOCKED]')
             return
 
+        remote_socket = socks.socksocket()
+        remote_socket.settimeout(60)
+
         url = f'{"https" if is_https else "http"}://{host}:{port}/'
         dom = get_domain_info(host)
-        params = dom.run_test(url) # получаем стратегию или DIRECT
+        if dom.status == 'EXTERN':
+            params = 'EXTERN'
+        else:
+            params = dom.run_test(url) # получаем стратегию или DIRECT
 
         # Подключение к серверу
         info(f'[>] Подключение: {host}:{port} '
              f'[{"HTTPS" if is_https else "HTTP"}] '
-             f'[{"DIRECT" if params == "DIRECT" else "PROXY"}]')
-        remote_socket = socks.socksocket()
-        remote_socket.settimeout(60)
+             f'[{params if params in ("DIRECT", "EXTERN") else "PROXY"}]')
 
         if params == 'DIRECT':
             pass
+        elif params == 'EXTERN':
+            remote_socket.set_proxy(EXTERN_PROTO, EXTERN_HOST, EXTERN_PORT)
         else:
             # определяем порт ciadpi
             target_port = get_params_to_port(params)
@@ -1084,7 +1095,7 @@ def start_proxy():
     listener = setup_logging()
 
     if not os.path.exists(CIADPI_EXE):
-        info(f'Не найден бинарник ByDPI: {STRATEGIES_FILE}. Выход')
+        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
         return
     # загрузка стратегий
     load_strategies()
@@ -1098,7 +1109,7 @@ def start_proxy():
                 if s: blacklist.add(s)
         info(f'[+] {len(blacklist)} доменов в черном списке')
 
-    debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID:  {os.getpid()})')
+    debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
@@ -1113,7 +1124,7 @@ def start_proxy():
             t.daemon = True
             t.start()
     except KeyboardInterrupt:
-        info("Shutting down...")
+        info('Shutting down...')
     finally:
         server.close()
         for p in active_processes.values():
