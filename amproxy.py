@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "curl-cffi",
+#   "pysocks",
+#   "beautifulsoup4",
+# ]
+# ///
 
 import sys, os, time
 from datetime import timedelta
@@ -475,6 +483,7 @@ class DomainInfo:
                             found_event.set()
                             return (params, response.content)
                     except (CurlError, RequestException) as err:
+                        debug(f'req err: {err}')
                         if self._check_error(err):
                             found_event.set()
                             return (params, '')
@@ -601,7 +610,7 @@ class DomainInfo:
                 res = await finished_task
                 if res:
                     result = res
-                    break # Нашли первый рабочий конфиг, выходим
+                    break # Нашли первую рабочую стратегию, выходим
         finally:
             # Отменяем все проверки, которые еще висят в очереди или в процессе
             for t in tasks:
@@ -618,6 +627,8 @@ class DomainInfo:
         # Если related == True - проверяется ссылка из тестируемой страницы
         debug(f'{self.domain} - {target_url} - {related}')
         if self.user_config:
+            info(f'[!] Используем пользовательскую стратегию для {self.domain}: '
+                  f'{self.params or self.status}')
             return self.params or self.status
         res = self.check_expired()
         if not related and res is not None:
@@ -819,8 +830,8 @@ def _load(filename, status, rules=False):
             elif status == 'USER':
                 # USER_RULES_FILE
                 domain, params = s.split(maxsplit=1)
-                if params == 'DIRECT':
-                    dom = DomainInfo(domain, 'DIRECT', user_config=True)
+                if params in ('DIRECT', 'BLOCK'):
+                    dom = DomainInfo(domain, params, user_config=True)
                 elif params.startswith('EXTERN'):
                     dom = DomainInfo(domain, 'EXTERN', user_config=True,
                                      extern_proxy=params[7:])
@@ -1061,15 +1072,14 @@ def handle_client(client_socket):
             if not host:
                 return
 
-        if host in blacklist:
-            debug(f'{host} [BLOCKED]')
-            return
-
         remote_socket = socks.socksocket()
         remote_socket.settimeout(60)
 
         url = f'{"https" if is_https else "http"}://{host}:{port}/'
         dom = get_domain_info(host)
+        if dom.status == 'BLOCK':
+            debug(f'{host} [BLOCKED]')
+            return
         if dom.status == 'EXTERN':
             params = 'EXTERN'
         else:
@@ -1137,13 +1147,6 @@ def start_proxy():
     load_strategies()
     # загрузка кэша
     load_rules()
-    # загрузка blacklist
-    if os.path.exists(BLACKLIST_FILE):
-        with open(BLACKLIST_FILE) as f:
-            for s in f:
-                s = s.split('#')[0].strip()
-                if s: blacklist.add(s)
-        info(f'[+] {len(blacklist)} доменов в черном списке')
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
