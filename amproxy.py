@@ -87,7 +87,7 @@ if command_line_args.section:
     config_section = command_line_args.section
     print(f'[C] Используется раздел конфиг-файла: {config_section}')
 if command_line_args.config:
-    if os.path.exists(command_line_args.config):
+    if Path(command_line_args.config).exists():
         CONFIG_FILE = command_line_args.config
         print(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
     else:
@@ -483,7 +483,6 @@ class DomainInfo:
                             found_event.set()
                             return (params, response.content)
                     except (CurlError, RequestException) as err:
-                        debug(f'req err: {err}')
                         if self._check_error(err):
                             found_event.set()
                             return (params, '')
@@ -791,6 +790,8 @@ class DomainRegistry:
         combined_keys = set(self._auto_data) | set(self._user_data)
         return iter(combined_keys)
 
+
+
 # Глобальный реестр доменов
 domain_registry = DomainRegistry() # {domain: DomainInfo}
 registry_lock = threading.Lock()
@@ -800,6 +801,33 @@ def get_domain_info(domain):
         if domain not in domain_registry:
             domain_registry[domain] = DomainInfo(domain)
         return domain_registry[domain]
+
+def update_user_params():
+    # Обновление пользовательских стратегий
+    info('[C] обновление пользовательских стратегий')
+    with registry_lock:
+        # Удаляем все пользовательские стратегии
+        domain_registry._user_data = {}
+        domain_registry._wildcard_keys = set()
+        # Обновляем 
+        _load(USER_RULES_FILE, 'USER')
+
+def watch_file():
+    # Мониторинг файла пользовательских стратегий
+    filename = USER_RULES_FILE
+    debug(f'запуск мониторинга файла {filename}')
+    last_mtime = 0
+    if filename.exists():
+        last_mtime = filename.stat().st_mtime
+    while True:
+        time.sleep(10)
+        if not filename.exists():
+            continue
+        current_mtime = filename.stat().st_mtime
+        if current_mtime != last_mtime:
+            debug(f'обнаружено изменение в {filename}')
+            update_user_params()
+            last_mtime = current_mtime
 
 # <DOMAINREGISTRY/>
 
@@ -816,7 +844,7 @@ HISTORY_FILE = CACHE_DIR / HISTORY_FILE
 URLS_FILE = CACHE_DIR / URLS_FILE
 
 def _load(filename, status, rules=False):
-    if not filename.is_file(): # проверяем существование файла
+    if not filename.exists(): # проверяем существование файла
         return
     with filename.open(encoding='utf-8') as f:
         for s in f:
@@ -863,7 +891,7 @@ def load_rules():
             if dom:
                 dom.history_params = params
     # загружаем urls
-    if not URLS_FILE.is_file():
+    if not URLS_FILE.exists():
         return
     for url in URLS_FILE.open(encoding='utf-8'):
         url = url.rstrip('\r\n')
@@ -903,13 +931,14 @@ def save_rules():
             for url in dom.urls:
                 print(url, file=u)
 
+STRATEGIES_FILE = Path(STRATEGIES_FILE)
 def load_strategies():
     global strategies
-    if not os.path.exists(STRATEGIES_FILE):
+    if not STRATEGIES_FILE.exists():
         error(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
         sys.exit()
     # загрузка стратегий
-    with open(STRATEGIES_FILE) as f:
+    with STRATEGIES_FILE.open() as f:
         for s in f:
             s = s.split('#')[0]
             s = s.strip()
@@ -1093,6 +1122,7 @@ def handle_client(client_socket):
         if params == 'DIRECT':
             pass
         elif params == 'EXTERN':
+            debug(f'{host}: подключение к внешнему прокси: {dom.extern_proxy}')
             set_proxy_from_url(remote_socket, dom.extern_proxy)
         else:
             # определяем порт ciadpi
@@ -1140,15 +1170,21 @@ def start_proxy():
     start_time = time.time()
     listener = setup_logging()
 
-    if not os.path.exists(CIADPI_EXE):
+    if not Path(CIADPI_EXE).exists():
         error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
         return
-    # загрузка стратегий
+    # Загрузка стратегий
     load_strategies()
-    # загрузка кэша
+    # Загрузка кэша
     load_rules()
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
+
+    # Запуск мониторига пользовательского файла стратегий в фоновом потоке
+    thr = threading.Thread(target=watch_file, daemon=True)
+    thr.start()
+
+    # Запуск сервера
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
