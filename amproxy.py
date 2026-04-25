@@ -287,6 +287,12 @@ def print_summary():
             info(f'В категорию {s} добавлены:')
             info('\n'.join(f'  {i}' for i in summary[s]))
     info('')
+    info(uptime())
+    info('')
+
+start_time = time.time()
+def uptime(txt='Uptime'):
+    return f'{txt}: {timedelta(seconds=int(time.time()-start_time))}'
 
 # </DEBUG>
 
@@ -847,7 +853,9 @@ def _load(filename, status, rules=False):
     if not filename.exists(): # проверяем существование файла
         return
     with filename.open(encoding='utf-8') as f:
+        lineno = 0
         for s in f:
+            lineno += 1
             s = s.split('#')[0] # убираем комментарии
             s = s.strip()
             if not s: continue
@@ -864,7 +872,11 @@ def _load(filename, status, rules=False):
                     dom = DomainInfo(domain, 'EXTERN', user_config=True,
                                      extern_proxy=params[7:])
                 else:
-                    dom = DomainInfo(domain, 'PROXY', params, user_config=True)
+                    if not params.startswith('-'):
+                        error(f'ошибка в файле {USER_RULES_FILE}: '
+                              f'строка {lineno}: не параметры: {params}')
+                    else:
+                        dom = DomainInfo(domain, 'PROXY', params, user_config=True)
             else:
                 # DIRECT_FILE и FAILED_FILE
                 domain, test_time = s.split(maxsplit=1)
@@ -879,26 +891,24 @@ def load_rules():
     _load(USER_RULES_FILE, 'USER')
     info(f'[+] Загружены правила для {len(domain_registry)} доменов')
     # загружаем историю параметров
-    if not HISTORY_FILE.exists():
-        return
-    with HISTORY_FILE.open(encoding='utf-8') as f:
-        for s in f:
-            s = s.strip()
-            if not s: continue
-            domain, params = s.split(maxsplit=1)
-            params = params.split('|')
-            dom = domain_registry.get(domain)
-            if dom:
-                dom.history_params = params
+    if HISTORY_FILE.exists():
+        with HISTORY_FILE.open(encoding='utf-8') as f:
+            for s in f:
+                s = s.strip()
+                if not s: continue
+                domain, params = s.split(maxsplit=1)
+                params = params.split('|')
+                dom = domain_registry.get(domain)
+                if dom:
+                    dom.history_params = params
     # загружаем urls
-    if not URLS_FILE.exists():
-        return
-    for url in URLS_FILE.open(encoding='utf-8'):
-        url = url.rstrip('\r\n')
-        parsed_url = urlparse(url)
-        dom = domain_registry.get(parsed_url.hostname)
-        if dom:
-            dom.urls.add(url)
+    if URLS_FILE.exists():
+        for url in URLS_FILE.open(encoding='utf-8'):
+            url = url.rstrip('\r\n')
+            parsed_url = urlparse(url)
+            dom = domain_registry.get(parsed_url.hostname)
+            if dom:
+                dom.urls.add(url)
 
 def save_rules():
     debug('сохранение правил')
@@ -1167,7 +1177,6 @@ def handle_client(client_socket):
                 pass
 
 def start_proxy():
-    start_time = time.time()
     listener = setup_logging()
 
     if not Path(CIADPI_EXE).exists():
@@ -1207,14 +1216,13 @@ def start_proxy():
             #p.wait()
         save_rules()
         listener.stop()
-        print('Uptime:', timedelta(seconds=int(time.time()-start_time)))
+        print(uptime())
 
 # <SERVER/>
 
 # поиск стратегии для одного домена
 # кэш не загружается и не сохраняется
 def test16(host):
-    start_time = time.time()
     listener = setup_logging()
     # загрузка стратегий
     load_strategies()
@@ -1232,7 +1240,7 @@ def test16(host):
         info(f'{domain} {dom.params or dom.status}')
 
     listener.stop()
-    print('\ntime:', timedelta(seconds=int(time.time()-start_time)))
+    print(uptime('\ntime'))
 
 #
 if __name__ == '__main__':
