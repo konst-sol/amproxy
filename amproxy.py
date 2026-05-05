@@ -5,6 +5,7 @@
 #   "curl-cffi",
 #   "pysocks",
 #   "beautifulsoup4",
+#   "requests",
 # ]
 # ///
 
@@ -20,6 +21,7 @@ from curl_cffi import requests, CurlError
 from curl_cffi.requests.exceptions import RequestException
 import threading
 import subprocess
+import requests as requests2 # для watch_network. с requests из curl_cffi не работает
 # 16k
 from bs4 import BeautifulSoup
 # from bs4 import XMLParsedAsHTMLWarning
@@ -58,8 +60,9 @@ URLS_FILE = 'urls.txt' # список urls, найденных при парси
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 # Конфигурационный файл
 CONFIG_FILE = 'amproxy.ini'
-# Черный список доменов
-BLACKLIST_FILE = 'blacklist.txt'
+# Динамическое изминение настроек при смене провайдера
+DYNAMIC_CONFIG = 1
+# Таймауты
 DIRECT_TEST_TIMEOUT = 4. # таймаут для проверки доступности (секунды)
 PROXY_TEST_TIMEOUT = 5. # таймаут для поиска стратегии
 SCAN_PAGE_TIMEOUT = 20. # общее время обработки страницы при поиске стратегии
@@ -71,13 +74,33 @@ PROXY_TTL = 7*24 # подключение через ciadpi
 FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
 LOG_LEVEL = 'INFO' # ERROR/INFO/DEBUG
 LOG_FILE = 'amproxy.log'
+
+# Определяем список имен параметров
+settings_list = []
+def get_settings_list():
+    for k, v in globals().items():
+        # все параметры должны быть большими буквами и иметь тип int, float, str
+        if k.isupper() and type(v) in (int, float, str):
+            settings_list.append(k)
+get_settings_list()
+
+# Переназначаем имена файлов в объекты Path
+CACHE_DIR = Path(CACHE_DIR)
+RULES_FILE = CACHE_DIR / RULES_FILE
+USER_RULES_FILE = Path(USER_RULES_FILE)
+DIRECT_FILE = CACHE_DIR / DIRECT_FILE
+FAILED_FILE = CACHE_DIR / FAILED_FILE
+HISTORY_FILE = CACHE_DIR / HISTORY_FILE
+URLS_FILE = CACHE_DIR / URLS_FILE
+STRATEGIES_FILE = Path(STRATEGIES_FILE)
+
 # </НАСТРОЙКИ>
 
 # <CLI>
 args_parser = ArgumentParser() #description='Описание скрипта'
 args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
 args_parser.add_argument('-c', '--config', help='конфиг-файл')
-# дополнительный необязательный аргумент
+# дополнительный необязательный аргумент (проверяемый домен)
 group = args_parser.add_mutually_exclusive_group()
 group.add_argument('domain', nargs='?', help='домен для тестирования')
 
@@ -96,11 +119,12 @@ if command_line_args.config:
 # </CLI>
 
 # <CONFIG_FILE>
+
 def _set_config_value(key, value):
     # устанавливаем глобальные переменные из конфига
     var_name = key.upper()
     # Проверяем существует ли уже такая переменная в глобальном пространстве
-    if var_name not in globals():
+    if var_name not in settings_list:
         print(f'[C] Неизвестная опция в конфиг-файле: {key}')
         return
     current_value = globals()[var_name]
@@ -118,8 +142,14 @@ def _set_config_value(key, value):
         print(f'[C] Не удалось преобразовать {var_name} в {target_type.__name__}')
 
 # Считываем конфиг-файл
+if not os.path.exists(CONFIG_FILE):
+    print('Конфиг не найден. Создаем дефолтный')
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        f.write('[DEFAULT]\n\n')
 config = ConfigParser()
-config.read(CONFIG_FILE)
+config.read(CONFIG_FILE, encoding='utf-8')
+
+
 # Считываем из раздела [DEFAULT]
 # (По умолчанию имена разделов чувствительны к регистру)
 for key, value in config.defaults().items():
@@ -132,6 +162,16 @@ if config_section:
     else:
         print(f'[C] Раздел {config_section} не найден')
 
+
+def add_new_section(isp_name):
+    # Дописывает новую секцию в конец конфиг-файла
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        if f'\n[{isp_name}]' in f.read():
+            return
+    debug(f'Новый провайдер. Добавляем секцию [{isp_name}] в конфиг-файл')
+    with open(CONFIG_FILE, 'a', encoding='utf-8') as f:
+        f.write(f'# Секция добавлена автоматически\n[{isp_name}]\n\n')
+
 # </CONFIG_FILE>
 
 # <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
@@ -141,8 +181,6 @@ params_to_port = {} # {params: port}
 active_processes = {} # {port: subprocess.Popen}
 # Глобальный реестр доменов
 domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
-# Черный список доменов
-blacklist = set()
 # </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 
 # <DEBUG>
@@ -195,6 +233,10 @@ def setup_logging():
     # отключить вывод asyncio и curl_cffi
     logging.getLogger('asyncio').setLevel(logging.WARNING)
     #logging.getLogger('curl_cffi').setLevel(logging.WARNING)
+    # отключить вывод requests и urllib3 (watch_network)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+
     return listener
 
 # Вывод статуса ciadpi, статистики использования стратегий
@@ -223,7 +265,7 @@ def print_ciadpi_status():
     if not active_processes:
         info(' Активных процессов ciadpi нет.')
     else:
-        info(f'{'PORT':<8} | {'PID':<8} | {'PARAMS'}')
+        info(f"{'PORT':<8} | {'PID':<8} | {'PARAMS'}")
         info('-' * 50)
         # Собираем данные из словарей params_to_port и active_processes
         # Для удобства создадим обратный маппинг портов в параметры
@@ -248,7 +290,7 @@ def print_params_stat():
             stat[dom.params] += 1
         else:
             stat[dom.params] = 1
-    info(f'{'NUM':<3} | {'PARAMS'}')
+    info(f"{'NUM':<3} | {'PARAMS'}")
     info('-' * 50)
     for d, n in sorted(stat.items(), key=lambda item: item[1]):
         info(f'{n:<3} | {d}')
@@ -286,9 +328,7 @@ def print_summary():
         else:
             info(f'В категорию {s} добавлены:')
             info('\n'.join(f'  {i}' for i in summary[s]))
-    info('')
-    info(uptime())
-    info('')
+    info(f'\n{uptime()}\n')
 
 start_time = time.time()
 def uptime(txt='Uptime'):
@@ -840,15 +880,6 @@ def watch_file():
 
 # <LOAD_RULES/SAVE_RULES>
 # Загрузка/сохранение кэша
-# Переназначаем имена файлов в объекты Path
-CACHE_DIR = Path(CACHE_DIR)
-RULES_FILE = CACHE_DIR / RULES_FILE
-USER_RULES_FILE = Path(USER_RULES_FILE) # в текущем каталоге
-DIRECT_FILE = CACHE_DIR / DIRECT_FILE
-FAILED_FILE = CACHE_DIR / FAILED_FILE
-HISTORY_FILE = CACHE_DIR / HISTORY_FILE
-URLS_FILE = CACHE_DIR / URLS_FILE
-
 def _load(filename, status, rules=False):
     if not filename.exists(): # проверяем существование файла
         return
@@ -941,7 +972,6 @@ def save_rules():
             for url in dom.urls:
                 print(url, file=u)
 
-STRATEGIES_FILE = Path(STRATEGIES_FILE)
 def load_strategies():
     global strategies
     if not STRATEGIES_FILE.exists():
@@ -956,6 +986,53 @@ def load_strategies():
     info(f'[+] Загружено {len(strategies)} стратегий')
 
 # </LOAD_RULES/SAVE_RULES>
+
+def watch_network():
+    debug('запуск мониторинга сети')
+    last_ip = None
+    last_isp = None
+    while True:
+        current_ip = None
+        try:
+            current_ip = requests2.get('https://api.ipify.org', timeout=10
+                                       ).text.strip()
+        except Exception as err:
+            debug(f'ip: {err}')
+        # Проверяем смену IP
+        if current_ip and current_ip != last_ip:
+            debug(f'Обнаружен новый IP: {current_ip}')
+            # Определяем провайдера
+            # Сервис ip-api.com имеет ограничение:
+            # не более 45 запросов в минуту на бесплатном тарифе.
+            # Если превысить этот лимит, ваш IP временно забанят.
+            try:
+                resp_url = f'http://ip-api.com/json/{current_ip}?fields=isp'
+                response = requests2.get(resp_url, timeout=10).json()
+                current_isp = response.get('isp')
+            except Exception as err:
+                debug(f'isp: {err}')
+            else:
+                # Если провайдер сменился - обновляем настройки
+                if current_isp and current_isp != last_isp:
+                    if last_isp:
+                        info(f'[!] Смена провайдера: {last_isp} -> {current_isp}')
+                    else:
+                        info(f'[!] Провайдер: {current_isp}')
+                    add_new_section(current_isp)
+                    last_isp = current_isp
+
+                    # считываем из раздела ISP
+                    config = ConfigParser()
+                    config.read(CONFIG_FILE, encoding='utf-8')
+                    for key, value in config.items(current_isp):
+                        _set_config_value(key, value)
+                    # TODO: обновить кэш
+
+                last_ip = current_ip
+
+        time.sleep(60) # Интервал проверки
+
+
 
 
 # EXTERN proxy
@@ -1180,7 +1257,8 @@ def start_proxy():
     listener = setup_logging()
 
     if not Path(CIADPI_EXE).exists():
-        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+        # FIXME: почему не работает error() ?
+        print(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
         return
     # Загрузка стратегий
     load_strategies()
@@ -1189,7 +1267,12 @@ def start_proxy():
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
 
-    # Запуск мониторига пользовательского файла стратегий в фоновом потоке
+    # Запуск мониторинга сети. Смена настроек при изменении провайдера
+    if DYNAMIC_CONFIG:
+        thr = threading.Thread(target=watch_network, daemon=True)
+        thr.start()
+
+    # Запуск мониторинга пользовательского файла стратегий
     thr = threading.Thread(target=watch_file, daemon=True)
     thr.start()
 
