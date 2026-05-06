@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.9"
 # dependencies = [
 #   "curl-cffi",
 #   "pysocks",
@@ -32,7 +32,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 # для логирования
 import logging, logging.handlers
-from logging import debug, info, error
+from logging import debug, info, error, exception as print_exc
 import queue
 import signal
 # аргументы ком. строки
@@ -60,7 +60,7 @@ URLS_FILE = 'urls.txt' # список urls, найденных при парси
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 # Конфигурационный файл
 CONFIG_FILE = 'amproxy.ini'
-# Динамическое изминение настроек при смене провайдера
+# Динамическое изменение настроек при смене провайдера
 DYNAMIC_CONFIG = 1
 # Таймауты
 DIRECT_TEST_TIMEOUT = 4. # таймаут для проверки доступности (секунды)
@@ -227,9 +227,6 @@ def setup_logging():
     level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
     logger.setLevel(level)
     logger.addHandler(logging.handlers.QueueHandler(log_queue))
-    # Вывод exception
-    global print_exc
-    print_exc = logger.exception
     # отключить вывод asyncio и curl_cffi
     logging.getLogger('asyncio').setLevel(logging.WARNING)
     #logging.getLogger('curl_cffi').setLevel(logging.WARNING)
@@ -543,7 +540,7 @@ class DomainInfo:
                     try:
                         proc.terminate()
                         await proc.wait()
-                    except:
+                    except Exception:
                         pass
         return None
 
@@ -740,7 +737,7 @@ class DomainInfo:
             for tested_url in rel_list:
                 parsed_url = urlparse(tested_url)
                 host = parsed_url.hostname
-                dom = get_domain_info(host)
+                dom = domain_registry.get_domain_info(host)
                 dom.urls.add(tested_url)
                 if host in tested_hosts:
                     continue
@@ -782,7 +779,12 @@ class DomainRegistry:
         self._auto_data = {}  # Программные (автоматические) домены
         self._user_data = {}  # Пользовательские из user-rules.txt (в т.ч. с *)
         self._wildcard_keys = set() # Быстрый доступ к списку масок
+        self._isp_name = None #'Unknown ISP'
+        self._lock = threading.Lock()
 
+    #
+    # Методы dict
+    #
     def __setitem__(self, key, value):
         if value.user_config:
             self._user_data[key] = value
@@ -836,27 +838,130 @@ class DomainRegistry:
         combined_keys = set(self._auto_data) | set(self._user_data)
         return iter(combined_keys)
 
+    #
+    # Загрузка/сохранение кэша
+    #
+    def _load(self, filename, status, rules=False):
+        if not filename.exists():
+            return
+        with filename.open(encoding='utf-8') as f:
+            lineno = 0
+            for s in f:
+                lineno += 1
+                s = s.split('#')[0] # убираем комментарии
+                s = s.strip()
+                if not s: continue
+                if rules:
+                    # RULES_FILE
+                    domain, test_time, params = s.split(maxsplit=2)
+                    dom = DomainInfo(domain, status, params, int(test_time))
+                elif status == 'USER':
+                    # USER_RULES_FILE
+                    domain, params = s.split(maxsplit=1)
+                    if params in ('DIRECT', 'BLOCK'):
+                        dom = DomainInfo(domain, params, user_config=True)
+                    elif params.startswith('EXTERN'):
+                        dom = DomainInfo(domain, 'EXTERN', user_config=True,
+                                         extern_proxy=params[7:])
+                    else:
+                        if not params.startswith('-'):
+                            error(f'ошибка в файле {USER_RULES_FILE}: '
+                                  f'строка {lineno}: не параметры: {params}')
+                        else:
+                            dom = DomainInfo(domain, 'PROXY', params,
+                                             user_config=True)
+                else:
+                    # DIRECT_FILE и FAILED_FILE
+                    domain, test_time = s.split(maxsplit=1)
+                    dom = DomainInfo(domain, status, test_time=int(test_time))
+                self[domain] = dom
+
+    def load_rules(self):
+        debug('загрузка правил')
+        with self._lock:
+            self._load(RULES_FILE, 'PROXY', True)
+            self._load(DIRECT_FILE, 'DIRECT')
+            self._load(FAILED_FILE, 'FAILED')
+            self._load(USER_RULES_FILE, 'USER')
+            info(f'[+] Загружены правила для {len(domain_registry)} доменов')
+            # загружаем историю параметров
+            if HISTORY_FILE.exists():
+                with HISTORY_FILE.open(encoding='utf-8') as f:
+                    for s in f:
+                        s = s.strip()
+                        if not s: continue
+                        domain, params = s.split(maxsplit=1)
+                        params = params.split('|')
+                        dom = self.get(domain)
+                        if dom:
+                            dom.history_params = params
+            # загружаем urls
+            if URLS_FILE.exists():
+                for url in URLS_FILE.open(encoding='utf-8'):
+                    url = url.rstrip('\r\n')
+                    parsed_url = urlparse(url)
+                    dom = self.get(parsed_url.hostname)
+                    if dom:
+                        dom.urls.add(url)
+
+    def save_rules(self):
+        debug('сохранение правил')
+        # Создаем CACHE_DIR, если его еще нет
+        RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if BACKUP_FILES:
+            for fn in (RULES_FILE, DIRECT_FILE, FAILED_FILE, HISTORY_FILE):
+                if fn.exists():
+                    # Создаем резервную копию
+                    # .with_suffix добавит/заменит расширение
+                    bak_file = fn.with_suffix(fn.suffix + '.bak')
+                    fn.replace(bak_file)
+        # Записываем данные
+        with (RULES_FILE.open('w', encoding='utf-8') as r,
+              DIRECT_FILE.open('w', encoding='utf-8') as d,
+              FAILED_FILE.open('w', encoding='utf-8') as f,
+              HISTORY_FILE.open('w', encoding='utf-8') as h,
+              URLS_FILE.open('w', encoding='utf-8') as u):
+            for dom in self.values():
+                if dom.status == 'PROXY':
+                    if not dom.user_config:
+                        # игнорируем пользовательские стратегии
+                        print(f'{dom.domain} {dom.test_time} {dom.params}', file=r)
+                elif dom.status == 'DIRECT':
+                    print(f'{dom.domain} {dom.test_time}', file=d)
+                elif dom.status == 'FAILED':
+                    print(f'{dom.domain} {dom.test_time}', file=f)
+                if dom.history_params:
+                    print(f'{dom.domain} {"|".join(dom.history_params)}', file=h)
+                for url in dom.urls:
+                    print(url, file=u)
+
+    def update_user_rules(self):
+        # Обновление пользовательских стратегий
+        info('[C] обновление пользовательских стратегий')
+        with self._lock:
+            # Удаляем все пользовательские стратегии
+            self._user_data = {}
+            self._wildcard_keys = set()
+            # Обновляем 
+            self._load(USER_RULES_FILE, 'USER')
+
+    #
+    # Доп. методы
+    #
+    def get_domain_info(self, domain):
+        # Безопасно извлекает или создает объект DomainInfo
+        with self._lock:
+            if domain not in self:
+                self[domain] = DomainInfo(domain)
+            return self[domain]
+
+    def set_isp(self, isp_name):
+        self._isp_name = isp_name
+        # TODO: обновить кэш
 
 
 # Глобальный реестр доменов
 domain_registry = DomainRegistry() # {domain: DomainInfo}
-registry_lock = threading.Lock()
-def get_domain_info(domain):
-    # Безопасно извлекает или создает объект DomainInfo
-    with registry_lock:
-        if domain not in domain_registry:
-            domain_registry[domain] = DomainInfo(domain)
-        return domain_registry[domain]
-
-def update_user_params():
-    # Обновление пользовательских стратегий
-    info('[C] обновление пользовательских стратегий')
-    with registry_lock:
-        # Удаляем все пользовательские стратегии
-        domain_registry._user_data = {}
-        domain_registry._wildcard_keys = set()
-        # Обновляем 
-        _load(USER_RULES_FILE, 'USER')
 
 def watch_file():
     # Мониторинг файла пользовательских стратегий
@@ -872,105 +977,11 @@ def watch_file():
         current_mtime = filename.stat().st_mtime
         if current_mtime != last_mtime:
             debug(f'обнаружено изменение в {filename}')
-            update_user_params()
+            domain_registry.update_user_rules()
             last_mtime = current_mtime
 
 # <DOMAINREGISTRY/>
 
-
-# <LOAD_RULES/SAVE_RULES>
-# Загрузка/сохранение кэша
-def _load(filename, status, rules=False):
-    if not filename.exists(): # проверяем существование файла
-        return
-    with filename.open(encoding='utf-8') as f:
-        lineno = 0
-        for s in f:
-            lineno += 1
-            s = s.split('#')[0] # убираем комментарии
-            s = s.strip()
-            if not s: continue
-            if rules:
-                # RULES_FILE
-                domain, test_time, params = s.split(maxsplit=2)
-                dom = DomainInfo(domain, status, params, int(test_time))
-            elif status == 'USER':
-                # USER_RULES_FILE
-                domain, params = s.split(maxsplit=1)
-                if params in ('DIRECT', 'BLOCK'):
-                    dom = DomainInfo(domain, params, user_config=True)
-                elif params.startswith('EXTERN'):
-                    dom = DomainInfo(domain, 'EXTERN', user_config=True,
-                                     extern_proxy=params[7:])
-                else:
-                    if not params.startswith('-'):
-                        error(f'ошибка в файле {USER_RULES_FILE}: '
-                              f'строка {lineno}: не параметры: {params}')
-                    else:
-                        dom = DomainInfo(domain, 'PROXY', params, user_config=True)
-            else:
-                # DIRECT_FILE и FAILED_FILE
-                domain, test_time = s.split(maxsplit=1)
-                dom = DomainInfo(domain, status, test_time=int(test_time))
-            domain_registry[domain] = dom
-
-def load_rules():
-    debug('загрузка правил')
-    _load(RULES_FILE, 'PROXY', True)
-    _load(DIRECT_FILE, 'DIRECT')
-    _load(FAILED_FILE, 'FAILED')
-    _load(USER_RULES_FILE, 'USER')
-    info(f'[+] Загружены правила для {len(domain_registry)} доменов')
-    # загружаем историю параметров
-    if HISTORY_FILE.exists():
-        with HISTORY_FILE.open(encoding='utf-8') as f:
-            for s in f:
-                s = s.strip()
-                if not s: continue
-                domain, params = s.split(maxsplit=1)
-                params = params.split('|')
-                dom = domain_registry.get(domain)
-                if dom:
-                    dom.history_params = params
-    # загружаем urls
-    if URLS_FILE.exists():
-        for url in URLS_FILE.open(encoding='utf-8'):
-            url = url.rstrip('\r\n')
-            parsed_url = urlparse(url)
-            dom = domain_registry.get(parsed_url.hostname)
-            if dom:
-                dom.urls.add(url)
-
-def save_rules():
-    debug('сохранение правил')
-    # Создаем CACHE_DIR, если его еще нет
-    RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if BACKUP_FILES:
-        for fn in (RULES_FILE, DIRECT_FILE, FAILED_FILE, HISTORY_FILE):
-            if fn.exists():
-                # Создаем резервную копию
-                # .with_suffix добавит/заменит расширение
-                bak_file = fn.with_suffix(fn.suffix + '.bak')
-                fn.replace(bak_file)
-    # Записываем данные
-    with (RULES_FILE.open('w', encoding='utf-8') as r,
-          DIRECT_FILE.open('w', encoding='utf-8') as d,
-          FAILED_FILE.open('w', encoding='utf-8') as f,
-          HISTORY_FILE.open('w', encoding='utf-8') as h,
-          URLS_FILE.open('w', encoding='utf-8') as u):
-        for dom in domain_registry.values():
-            if dom.status == 'PROXY':
-                if not dom.user_config:
-                    # игнорируем пользовательские стратегии
-                    print(f'{dom.domain} {dom.test_time} {dom.params}', file=r)
-            elif dom.status == 'DIRECT':
-                print(f'{dom.domain} {dom.test_time}', file=d)
-            elif dom.status == 'FAILED':
-                print(f'{dom.domain} {dom.test_time}', file=f)
-            if dom.history_params:
-                print(f'{dom.domain} {"|".join(dom.history_params)}', file=h)
-            for url in dom.urls:
-                print(url, file=u)
 
 def load_strategies():
     global strategies
@@ -984,8 +995,6 @@ def load_strategies():
             s = s.strip()
             if s and s not in strategies: strategies.append(s)
     info(f'[+] Загружено {len(strategies)} стратегий')
-
-# </LOAD_RULES/SAVE_RULES>
 
 def watch_network():
     debug('запуск мониторинга сети')
@@ -1026,7 +1035,7 @@ def watch_network():
                     config.read(CONFIG_FILE, encoding='utf-8')
                     for key, value in config.items(current_isp):
                         _set_config_value(key, value)
-                    # TODO: обновить кэш
+                    domain_registry.set_isp(current_isp)
 
                 last_ip = current_ip
 
@@ -1073,7 +1082,7 @@ def set_proxy_from_url(socket_obj, url):
 params_to_port_lock = threading.Lock()
 def get_params_to_port(params):
     # Безопасно извлекает или создает запись в params_to_port
-    with registry_lock:
+    with params_to_port_lock:
         if params not in params_to_port:
             params_to_port[params] = get_free_port()
         return params_to_port[params]
@@ -1092,6 +1101,7 @@ def get_free_port():
 
 
 def run_ciadpi(port, params):
+    # запускаем ciadpi и проверяем запустился ли
     cmd = f'{CIADPI_EXE} -i 127.0.0.1 -p {port} {params}'
     proc = subprocess.Popen(cmd.split(),
                             stdout=subprocess.DEVNULL,
@@ -1143,7 +1153,7 @@ def pipe(source, destination, dom):
         # ловим таймаут
         if dom.status == 'PROXY':
             debug(f'Timeout: {dom.domain} {dom.params} {len(dom.urls)}')
-    except Exception as err:
+    except Exception:
         pass
     finally:
         # shutdown(SHUT_RD) гарантирует, что recv() во втором потоке 
@@ -1161,7 +1171,7 @@ def handle_client(client_socket):
         client_socket.settimeout(60)
         request = None
         try: request = client_socket.recv(8192)
-        except: pass
+        except Exception: pass
         if not request: return
 
         header_line = request.decode('iso-8859-1').split('\n')[0]
@@ -1192,7 +1202,7 @@ def handle_client(client_socket):
         remote_socket.settimeout(60)
 
         url = f'{"https" if is_https else "http"}://{host}:{port}/'
-        dom = get_domain_info(host)
+        dom = domain_registry.get_domain_info(host)
         if dom.status == 'BLOCK':
             debug(f'{host} [BLOCKED]')
             return
@@ -1224,7 +1234,7 @@ def handle_client(client_socket):
         # соединение
         try:
             remote_socket.connect((host, port))
-        except:
+        except Exception:
             return
 
         if is_https:
@@ -1257,13 +1267,13 @@ def start_proxy():
     listener = setup_logging()
 
     if not Path(CIADPI_EXE).exists():
-        # FIXME: почему не работает error() ?
-        print(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+        listener.stop()
         return
     # Загрузка стратегий
     load_strategies()
     # Загрузка кэша
-    load_rules()
+    domain_registry.load_rules()
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
 
@@ -1297,7 +1307,7 @@ def start_proxy():
         for p in active_processes.values():
             p.terminate()
             #p.wait()
-        save_rules()
+        domain_registry.save_rules()
         listener.stop()
         print(uptime())
 
@@ -1310,7 +1320,7 @@ def test16(host):
     # загрузка стратегий
     load_strategies()
 
-    dom = get_domain_info(host)
+    dom = domain_registry.get_domain_info(host)
     try:
         res = dom.run_test(f'https://{host}')
     finally:
