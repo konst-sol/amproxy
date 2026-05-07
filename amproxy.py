@@ -803,11 +803,11 @@ class DomainRegistry:
         self._auto_data = {}  # Программные (автоматические) домены
         self._user_data = {}  # Пользовательские из user-rules.txt (в т.ч. с *)
         self._wildcard_keys = set() # Быстрый доступ к списку масок
-        self._isp_name = None #'Unknown ISP'
+        self._isp_name = None
         self._lock = threading.Lock()
-        self._set_cache_files()
+        self._set_cache_path()
 
-    def _set_cache_files(self):
+    def _set_cache_path(self):
         cache_path = CACHE_DIR
         if self._isp_name:
             # кэш в подкаталоге с именем провайдера
@@ -984,15 +984,8 @@ class DomainRegistry:
             # Обновляем 
             self._load(USER_RULES_FILE, 'USER')
 
-    def reload_cache(self):
-        debug('перезагрузка кэша')
-        self._auto_data = {}
-        self._user_data = {}
-        self._wildcard_keys = set()
-        self.load_rules()
-
     #
-    # Доп. методы
+    # Остальные методы
     #
     def get_domain_info(self, domain):
         # Безопасно извлекает или создает объект DomainInfo
@@ -1003,10 +996,22 @@ class DomainRegistry:
 
     def set_isp(self, isp_name):
         # Изменение кэша при смене провайдера
-        debug(isp_name)
-        #self._isp_name = isp_name
-        # TODO: обновить кэш
-        return
+        if isp_name == self._isp_name:
+            return
+        debug(f'новый ISP: {isp_name}. Перезагрузка кэша')
+        # сохраняем
+        if self._auto_data:
+            self.save_rules()
+        # обнуляем
+        self._auto_data = {}
+        self._user_data = {}
+        self._wildcard_keys = set()
+        # новые пути к файлам кэша
+        self._isp_name = isp_name
+        self._set_cache_path()
+        # обновляем
+        self.load_rules()
+        # TODO: апгрейд логирования и др. настроек
 
 # Глобальный реестр доменов
 domain_registry = DomainRegistry() # {domain: DomainInfo}
