@@ -24,15 +24,10 @@ import subprocess
 import requests as requests2 # для watch_network. с requests из curl_cffi не работает
 # 16k
 from bs4 import BeautifulSoup
-# from bs4 import XMLParsedAsHTMLWarning
-# import warnings
-# # Отключаем предупреждение BeautifulSoup
-# # "you're using an HTML parser to parse an XML document"
-# warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from urllib.parse import urljoin, urlparse
 # для логирования
 import logging, logging.handlers
-from logging import debug, info, error, exception as print_exc
+from logging import exception as print_exc
 import queue
 import signal
 # аргументы ком. строки
@@ -86,104 +81,15 @@ get_settings_list()
 
 # Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
-RULES_FILE = CACHE_DIR / RULES_FILE
 USER_RULES_FILE = Path(USER_RULES_FILE)
-DIRECT_FILE = CACHE_DIR / DIRECT_FILE
-FAILED_FILE = CACHE_DIR / FAILED_FILE
-HISTORY_FILE = CACHE_DIR / HISTORY_FILE
-URLS_FILE = CACHE_DIR / URLS_FILE
 STRATEGIES_FILE = Path(STRATEGIES_FILE)
 
 # </НАСТРОЙКИ>
 
-# <CLI>
-args_parser = ArgumentParser() #description='Описание скрипта'
-args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
-args_parser.add_argument('-c', '--config', help='конфиг-файл')
-# дополнительный необязательный аргумент (проверяемый домен)
-group = args_parser.add_mutually_exclusive_group()
-group.add_argument('domain', nargs='?', help='домен для тестирования')
+# <LOGGING>
+# Настраиваем логирование в самом начале,
+# чтобы дальше использовать info(), debug(), error()
 
-command_line_args = args_parser.parse_args()
-config_section = None
-if command_line_args.section:
-    config_section = command_line_args.section
-    print(f'[C] Используется раздел конфиг-файла: {config_section}')
-if command_line_args.config:
-    if Path(command_line_args.config).exists():
-        CONFIG_FILE = command_line_args.config
-        print(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
-    else:
-        print(f'[C] Конфиг-файл {command_line_args.config} не найден')
-
-# </CLI>
-
-# <CONFIG_FILE>
-
-def _set_config_value(key, value):
-    # устанавливаем глобальные переменные из конфига
-    var_name = key.upper()
-    # Проверяем существует ли уже такая переменная в глобальном пространстве
-    if var_name not in settings_list:
-        print(f'[C] Неизвестная опция в конфиг-файле: {key}')
-        return
-    current_value = globals()[var_name]
-    # Сохраняем тип дефолтной переменной (int, float, str)
-    target_type = type(current_value)
-    if target_type not in (int, float, str):
-        # Переназначаем только переменные int, float и str
-        print(f'[C] Неизвестная опция в конфиг-файле: {key}')
-        return
-    try:
-        # Пытаемся привести строку из конфига к типу дефолта
-        globals()[var_name] = target_type(value)
-        print(f'[C] {var_name}: {value}')
-    except ValueError:
-        print(f'[C] Не удалось преобразовать {var_name} в {target_type.__name__}')
-
-# Считываем конфиг-файл
-if not os.path.exists(CONFIG_FILE):
-    print('Конфиг не найден. Создаем дефолтный')
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        f.write('[DEFAULT]\n\n')
-config = ConfigParser()
-config.read(CONFIG_FILE, encoding='utf-8')
-
-
-# Считываем из раздела [DEFAULT]
-# (По умолчанию имена разделов чувствительны к регистру)
-for key, value in config.defaults().items():
-    _set_config_value(key, value)
-# считываем из раздела, указанного в ком. строке (-s <раздел>)
-if config_section:
-    if config.has_section(config_section):
-        for key, value in config.items(config_section):
-            _set_config_value(key, value)
-    else:
-        print(f'[C] Раздел {config_section} не найден')
-
-
-def add_new_section(isp_name):
-    # Дописывает новую секцию в конец конфиг-файла
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        if f'\n[{isp_name}]' in f.read():
-            return
-    debug(f'Новый провайдер. Добавляем секцию [{isp_name}] в конфиг-файл')
-    with open(CONFIG_FILE, 'a', encoding='utf-8') as f:
-        f.write(f'# Секция добавлена автоматически\n[{isp_name}]\n\n')
-
-# </CONFIG_FILE>
-
-# <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
-strategies = [] # список тестируемых стратегий
-# Служебные данные процессов
-params_to_port = {} # {params: port}
-active_processes = {} # {port: subprocess.Popen}
-# Глобальный реестр доменов
-domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
-# </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
-
-# <DEBUG>
 # Настройка вывода
 class LevelFormatter(logging.Formatter):
     # Форматы для разных уровней
@@ -197,48 +103,165 @@ class LevelFormatter(logging.Formatter):
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
 
-# Безопасное логирование
-log_queue = queue.Queue()
-def setup_logging():
-    handlers = []
-    # Превращаем путь в объект Path
-    if LOG_FILE:
-        log_path = CACHE_DIR / LOG_FILE
-        log_path.parent.mkdir(parents=True, exist_ok=True) # если CACHE_DIR ещё нет
-        # Вывод в файл
-        # размер лог-файла 100 КБ, храним 4 старые копии
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_path,
-            maxBytes=100 * 1024,
-            backupCount=4,
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(LevelFormatter())
-        handlers.append(file_handler)
-    # Вывод в консоль
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(LevelFormatter())
-    handlers.append(console_handler)
-    # Listener будет забирать логи из очереди и отдавать их в ротатор
-    listener = logging.handlers.QueueListener(log_queue, *handlers) # respect_handler_level=True если разный log_level для разных handler
-    listener.start()
-    # Настраиваем корневой логгер отправлять всё в очередь
-    logger = logging.getLogger()
-    level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
-    logger.setLevel(level)
-    logger.addHandler(logging.handlers.QueueHandler(log_queue))
-    # отключить вывод asyncio и curl_cffi
-    logging.getLogger('asyncio').setLevel(logging.WARNING)
-    #logging.getLogger('curl_cffi').setLevel(logging.WARNING)
-    # отключить вывод requests и urllib3 (watch_network)
-    logging.getLogger('requests').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
+class LogManager:
+    def __init__(self):
+        self.log_queue = queue.Queue()
+        self.logger = logging.getLogger(__name__)
+        self.listener = None
+        # Временная настройка до загрузки конфига
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(LevelFormatter())
 
-    return listener
+        self.listener = logging.handlers.QueueListener(self.log_queue, console_handler)
+        self.listener.start()
+        self.logger.addHandler(logging.handlers.QueueHandler(self.log_queue))
+        self.logger.setLevel(LOG_LEVEL)
+        # функции вывода логов
+        global info, debug, error
+        info = self.logger.info
+        debug = self.logger.debug
+        error = self.logger.error
 
+    def upgrade(self):
+        # Настройка после чтения конфига
+        # Останавливаем старый listener
+        if self.listener:
+            self.listener.stop()
+        handlers = []
+        # Настройка вывода в файла
+        if LOG_FILE:
+            log_path = CACHE_DIR / LOG_FILE
+            log_path.parent.mkdir(parents=True, exist_ok=True) # если CACHE_DIR ещё нет
+            # Вывод в файл
+            # размер лог-файла 100 КБ, храним 4 старые копии
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_path, maxBytes=100*1024, backupCount=4, encoding='utf-8'
+            )
+            file_handler.setFormatter(LevelFormatter())
+            handlers.append(file_handler)
+
+        # Настройка вывода в консоль
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(LevelFormatter())
+        handlers.append(console_handler)
+
+        # Запуск нового listener
+        # listener будет забирать логи из очереди и отдавать их в ротатор
+        self.listener = logging.handlers.QueueListener(self.log_queue, *handlers)
+        self.listener.start()
+
+        # Обновление уровня
+        level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
+        self.logger.setLevel(level)
+
+    def stop(self):
+        # Корректное завершение работы (важно для QueueListener)
+        if self.listener:
+            self.listener.stop()
+
+log_manager = LogManager()
+
+# </LOGGING>
+
+# <CLI>
+args_parser = ArgumentParser() #description='Описание скрипта'
+args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
+args_parser.add_argument('-c', '--config', help='конфиг-файл')
+# дополнительный необязательный аргумент (проверяемый домен)
+group = args_parser.add_mutually_exclusive_group()
+group.add_argument('domain', nargs='?', help='домен для тестирования')
+
+command_line_args = args_parser.parse_args()
+config_section = None
+if command_line_args.section:
+    config_section = command_line_args.section
+    info(f'[C] Используется раздел конфиг-файла: {config_section}')
+if command_line_args.config:
+    if Path(command_line_args.config).exists():
+        CONFIG_FILE = command_line_args.config
+        info(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
+    else:
+        error(f'Конфиг-файл {command_line_args.config} не найден')
+
+# </CLI>
+
+# <CONFIG_FILE>
+def _set_config_value(key, value):
+    # устанавливаем глобальные переменные из конфига
+    var_name = key.upper()
+    # Проверяем существует ли уже такая переменная в глобальном пространстве
+    if var_name not in settings_list:
+        error(f'Неизвестная опция в конфиг-файле: {key}')
+        return
+    current_value = globals()[var_name]
+    # Сохраняем тип дефолтной переменной (int, float, str)
+    target_type = type(current_value)
+    if target_type not in (int, float, str):
+        # Переназначаем только переменные int, float и str
+        error(f'Неизвестная опция в конфиг-файле: {key}')
+        return
+    try:
+        # Пытаемся привести строку из конфига к типу дефолта
+        globals()[var_name] = target_type(value)
+        info(f'[C] {var_name}: {value}')
+    except ValueError:
+        error(f'Не удалось преобразовать {var_name} в {target_type.__name__}')
+
+# Считываем конфиг-файл
+if not os.path.exists(CONFIG_FILE):
+    info('Конфиг не найден. Создаем дефолтный')
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        f.write('[DEFAULT]\n\n')
+config = ConfigParser()
+config.read(CONFIG_FILE, encoding='utf-8')
+
+# Считываем из раздела [DEFAULT]
+# (По умолчанию имена разделов чувствительны к регистру)
+for key, value in config.defaults().items():
+    _set_config_value(key, value)
+# считываем из раздела, указанного в ком. строке (-s <раздел>)
+if config_section:
+    if config.has_section(config_section):
+        for key, value in config.items(config_section):
+            _set_config_value(key, value)
+    else:
+        error(f'Раздел {config_section} не найден')
+
+# Если в конфиг-файле указан другой уровень логирования или путь к логу
+log_manager.upgrade()
+
+def add_new_section(isp_name):
+    # Дописывает новую секцию в конец конфиг-файла (для watch_network)
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        if f'\n[{isp_name}]' in f.read():
+            return
+    debug(f'Новый провайдер. Добавляем секцию [{isp_name}] в конфиг-файл')
+    with open(CONFIG_FILE, 'a', encoding='utf-8') as f:
+        f.write(f'# Секция добавлена автоматически\n[{isp_name}]\n\n')
+
+# </CONFIG_FILE>
+
+# Проверка необходимых файлов
+if not Path(CIADPI_EXE).exists():
+    sys.exit(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+if not STRATEGIES_FILE.exists():
+    sys.exit(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+
+# <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
+strategies = [] # список тестируемых стратегий
+# Служебные данные процессов
+params_to_port = {} # {params: port}
+active_processes = {} # {port: subprocess.Popen}
+# Глобальный реестр доменов
+domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
+# </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
+
+
+# <DEBUG>
 # Вывод статуса ciadpi, статистики использования стратегий
 # и добавления доменов в кэш
-# по Ctrl+Break / kill -USR1 <PID> (pkill -USR1 -f amproxy.py)
+# по Ctrl+Break для Windows
+# или kill -USR1 <PID> (pkill -USR1 -f amproxy.py) для *nix
 def print_status(signum, frame):
     # Функция-обработчик сигнала для вывода информации
     print_ciadpi_status()
@@ -771,6 +794,7 @@ class DomainInfo:
 
 # </DOMAININFO>
 
+
 # <DOMAINREGISTRY>
 # dict-подобный класс - список всех доменов
 # ключ: доменное имя (строка), значение: объект класса DomainInfo
@@ -781,6 +805,19 @@ class DomainRegistry:
         self._wildcard_keys = set() # Быстрый доступ к списку масок
         self._isp_name = None #'Unknown ISP'
         self._lock = threading.Lock()
+        self._set_cache_files()
+
+    def _set_cache_files(self):
+        cache_path = CACHE_DIR
+        if self._isp_name:
+            # кэш в подкаталоге с именем провайдера
+            cache_path = CACHE_DIR / self._isp_name
+        debug(f'каталог кэша: {cache_path}')
+        self.RULES_FILE = cache_path / RULES_FILE
+        self.DIRECT_FILE = cache_path / DIRECT_FILE
+        self.FAILED_FILE = cache_path / FAILED_FILE
+        self.HISTORY_FILE = cache_path / HISTORY_FILE
+        self.URLS_FILE = cache_path / URLS_FILE
 
     #
     # Методы dict
@@ -879,14 +916,14 @@ class DomainRegistry:
     def load_rules(self):
         debug('загрузка правил')
         with self._lock:
-            self._load(RULES_FILE, 'PROXY', True)
-            self._load(DIRECT_FILE, 'DIRECT')
-            self._load(FAILED_FILE, 'FAILED')
+            self._load(self.RULES_FILE, 'PROXY', True)
+            self._load(self.DIRECT_FILE, 'DIRECT')
+            self._load(self.FAILED_FILE, 'FAILED')
             self._load(USER_RULES_FILE, 'USER')
-            info(f'[+] Загружены правила для {len(domain_registry)} доменов')
+            info(f'[+] Загружены правила для {len(self)} доменов')
             # загружаем историю параметров
-            if HISTORY_FILE.exists():
-                with HISTORY_FILE.open(encoding='utf-8') as f:
+            if self.HISTORY_FILE.exists():
+                with self.HISTORY_FILE.open(encoding='utf-8') as f:
                     for s in f:
                         s = s.strip()
                         if not s: continue
@@ -896,31 +933,33 @@ class DomainRegistry:
                         if dom:
                             dom.history_params = params
             # загружаем urls
-            if URLS_FILE.exists():
-                for url in URLS_FILE.open(encoding='utf-8'):
-                    url = url.rstrip('\r\n')
-                    parsed_url = urlparse(url)
-                    dom = self.get(parsed_url.hostname)
-                    if dom:
-                        dom.urls.add(url)
+            if self.URLS_FILE.exists():
+                with self.URLS_FILE.open(encoding='utf-8') as f:
+                    for url in f:
+                        url = url.rstrip('\r\n')
+                        parsed_url = urlparse(url)
+                        dom = self.get(parsed_url.hostname)
+                        if dom:
+                            dom.urls.add(url)
 
     def save_rules(self):
         debug('сохранение правил')
         # Создаем CACHE_DIR, если его еще нет
-        RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
         if BACKUP_FILES:
-            for fn in (RULES_FILE, DIRECT_FILE, FAILED_FILE, HISTORY_FILE):
+            for fn in (self.RULES_FILE, self.DIRECT_FILE,
+                       self.FAILED_FILE, self.HISTORY_FILE):
                 if fn.exists():
                     # Создаем резервную копию
                     # .with_suffix добавит/заменит расширение
                     bak_file = fn.with_suffix(fn.suffix + '.bak')
                     fn.replace(bak_file)
         # Записываем данные
-        with (RULES_FILE.open('w', encoding='utf-8') as r,
-              DIRECT_FILE.open('w', encoding='utf-8') as d,
-              FAILED_FILE.open('w', encoding='utf-8') as f,
-              HISTORY_FILE.open('w', encoding='utf-8') as h,
-              URLS_FILE.open('w', encoding='utf-8') as u):
+        with (self.RULES_FILE.open('w', encoding='utf-8') as r,
+              self.DIRECT_FILE.open('w', encoding='utf-8') as d,
+              self.FAILED_FILE.open('w', encoding='utf-8') as f,
+              self.HISTORY_FILE.open('w', encoding='utf-8') as h,
+              self.URLS_FILE.open('w', encoding='utf-8') as u):
             for dom in self.values():
                 if dom.status == 'PROXY':
                     if not dom.user_config:
@@ -945,6 +984,13 @@ class DomainRegistry:
             # Обновляем 
             self._load(USER_RULES_FILE, 'USER')
 
+    def reload_cache(self):
+        debug('перезагрузка кэша')
+        self._auto_data = {}
+        self._user_data = {}
+        self._wildcard_keys = set()
+        self.load_rules()
+
     #
     # Доп. методы
     #
@@ -956,12 +1002,15 @@ class DomainRegistry:
             return self[domain]
 
     def set_isp(self, isp_name):
-        self._isp_name = isp_name
+        # Изменение кэша при смене провайдера
+        debug(isp_name)
+        #self._isp_name = isp_name
         # TODO: обновить кэш
-
+        return
 
 # Глобальный реестр доменов
 domain_registry = DomainRegistry() # {domain: DomainInfo}
+
 
 def watch_file():
     # Мониторинг файла пользовательских стратегий
@@ -984,10 +1033,6 @@ def watch_file():
 
 
 def load_strategies():
-    global strategies
-    if not STRATEGIES_FILE.exists():
-        error(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
-        sys.exit()
     # загрузка стратегий
     with STRATEGIES_FILE.open() as f:
         for s in f:
@@ -995,6 +1040,9 @@ def load_strategies():
             s = s.strip()
             if s and s not in strategies: strategies.append(s)
     info(f'[+] Загружено {len(strategies)} стратегий')
+
+load_strategies()
+
 
 def watch_network():
     debug('запуск мониторинга сети')
@@ -1007,6 +1055,7 @@ def watch_network():
                                        ).text.strip()
         except Exception as err:
             debug(f'ip: {err}')
+            # не делаем continue чтобы time.sleep()
         # Проверяем смену IP
         if current_ip and current_ip != last_ip:
             debug(f'Обнаружен новый IP: {current_ip}')
@@ -1040,8 +1089,6 @@ def watch_network():
                 last_ip = current_ip
 
         time.sleep(60) # Интервал проверки
-
-
 
 
 # EXTERN proxy
@@ -1264,14 +1311,6 @@ def handle_client(client_socket):
                 pass
 
 def start_proxy():
-    listener = setup_logging()
-
-    if not Path(CIADPI_EXE).exists():
-        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
-        listener.stop()
-        return
-    # Загрузка стратегий
-    load_strategies()
     # Загрузка кэша
     domain_registry.load_rules()
 
@@ -1308,7 +1347,7 @@ def start_proxy():
             p.terminate()
             #p.wait()
         domain_registry.save_rules()
-        listener.stop()
+        log_manager.stop()
         print(uptime())
 
 # <SERVER/>
@@ -1316,10 +1355,6 @@ def start_proxy():
 # поиск стратегии для одного домена
 # кэш не загружается и не сохраняется
 def test16(host):
-    listener = setup_logging()
-    # загрузка стратегий
-    load_strategies()
-
     dom = domain_registry.get_domain_info(host)
     try:
         res = dom.run_test(f'https://{host}')
@@ -1332,7 +1367,7 @@ def test16(host):
         dom = domain_registry[domain]
         info(f'{domain} {dom.params or dom.status}')
 
-    listener.stop()
+    log_manager.stop()
     print(uptime('\ntime'))
 
 #
