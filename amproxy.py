@@ -105,10 +105,11 @@ class LevelFormatter(logging.Formatter):
 
 class LogManager:
     def __init__(self):
+        # Безопасное логирование через очередь сообщений
         self.log_queue = queue.Queue()
         self.logger = logging.getLogger(__name__)
         self.listener = None
-        # Временная настройка до загрузки конфига
+        # Временная настройка вывода в консоль до загрузки конфига
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(LevelFormatter())
 
@@ -182,7 +183,6 @@ if command_line_args.config:
         info(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
     else:
         error(f'Конфиг-файл {command_line_args.config} не найден')
-
 # </CLI>
 
 # <CONFIG_FILE>
@@ -739,9 +739,11 @@ class DomainInfo:
                 return 'DIRECT'
 
             if related:
-                # идет проверка встроенных в страницу ссылок (не создаем рекурсию)
+                # прерываемся, поскольку идет проверка встроенных в страницу ссылок
+                # (не создаем рекурсию)
                 return ret[0] # не используется
 
+            # Перепроверка найденной стратегии
             params, content = ret
             # определяем порт ciadpi
             proxy_port = get_params_to_port(params)
@@ -1355,11 +1357,11 @@ def start_proxy():
         log_manager.stop()
         print(uptime())
 
-# <SERVER/>
+# </SERVER>
 
 # поиск стратегии для одного домена
 # кэш не загружается и не сохраняется
-def test16(host):
+def test_domain(host):
     dom = domain_registry.get_domain_info(host)
     try:
         res = dom.run_test(f'https://{host}')
@@ -1378,7 +1380,7 @@ def test16(host):
 #
 if __name__ == '__main__':
     if command_line_args.domain:
-        test16(command_line_args.domain)
+        test_domain(command_line_args.domain)
     else:
         start_proxy()
 
