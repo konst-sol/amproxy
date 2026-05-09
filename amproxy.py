@@ -1001,6 +1001,15 @@ class DomainRegistry:
         if isp_name == self._isp_name:
             return
         debug(f'новый ISP: {isp_name}. Перезагрузка кэша')
+        # Обновление настроек
+        # считываем настройки из раздела ISP
+        config = ConfigParser()
+        config.read(CONFIG_FILE, encoding='utf-8')
+        for key, value in config.items(isp_name):
+            _set_config_value(key, value)
+        # Обновление логирования
+        log_manager.upgrade()
+        # Обновление кэша
         # сохраняем
         if self._auto_data:
             self.save_rules()
@@ -1013,7 +1022,6 @@ class DomainRegistry:
         self._set_cache_path()
         # обновляем
         self.load_rules()
-        # TODO: апгрейд логирования и др. настроек
 
 # Глобальный реестр доменов
 domain_registry = DomainRegistry() # {domain: DomainInfo}
@@ -1058,7 +1066,7 @@ def watch_network():
     while True:
         current_ip = None
         try:
-            current_ip = requests2.get('https://api.ipify.org', timeout=10
+            current_ip = requests2.get('https://api.ipify.org', timeout=30
                                        ).text.strip()
         except Exception as err:
             debug(f'ip: {err}')
@@ -1072,7 +1080,7 @@ def watch_network():
             # Если превысить этот лимит, ваш IP временно забанят.
             try:
                 resp_url = f'http://ip-api.com/json/{current_ip}?fields=isp'
-                response = requests2.get(resp_url, timeout=10).json()
+                response = requests2.get(resp_url, timeout=30).json()
                 current_isp = response.get('isp')
             except Exception as err:
                 debug(f'isp: {err}')
@@ -1086,11 +1094,6 @@ def watch_network():
                     add_new_section(current_isp)
                     last_isp = current_isp
 
-                    # считываем из раздела ISP
-                    config = ConfigParser()
-                    config.read(CONFIG_FILE, encoding='utf-8')
-                    for key, value in config.items(current_isp):
-                        _set_config_value(key, value)
                     domain_registry.set_isp(current_isp)
 
                 last_ip = current_ip
@@ -1361,10 +1364,14 @@ def start_proxy():
 
 # поиск стратегии для одного домена
 # кэш не загружается и не сохраняется
-def test_domain(host):
-    dom = domain_registry.get_domain_info(host)
+def test_domain(url):
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://'+url
+    parsed_url = urlparse(url)
+    domain = parsed_url.hostname
+    dom = domain_registry.get_domain_info(domain)
     try:
-        res = dom.run_test(f'https://{host}')
+        dom.run_test(url)
     finally:
         for p in active_processes.values():
             p.terminate()
