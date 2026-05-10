@@ -17,5 +17,6 @@
 * BeautifulSoup
 
 ### Дополнительная информация
-* <docs/HOWITWORK.md>
-* <docs/user_rules.md>
+* [Подробно как подбирается стратегия](docs/HOWITWORK.md)
+* [Пользовательский файл стратегий](docs/user_rules.md)
+
