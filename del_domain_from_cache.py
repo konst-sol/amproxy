@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-
 import sys
+from glob import glob
 
 help = '''Использование:
   -a domain    удалить domain из всех файлов кэша
@@ -19,8 +19,7 @@ if '-t' in sys.argv:
     msg = 'найдено в'
 
 if len(sys.argv) != 3:
-    print(help)
-    sys.exit()
+    sys.exit(help)
 
 def del_line(filename, s):
     with open(filename) as f:
@@ -39,18 +38,19 @@ def del_line(filename, s):
 
 if sys.argv[1] == '-a':
     files = ['cache/direct.txt', 'cache/failed.txt',
-             'cache/rules.txt', 'cache/history.txt']
+             'cache/rules.txt', 'cache/history.txt'] + \
+             glob('cache/*/direct.txt') + glob('cache/*/failed.txt') + \
+             glob('cache/*/rules.txt') + glob('cache/*/history.txt')
 elif sys.argv[1] == '-d':
-    files = ['cache/direct.txt']
+    files = ['cache/direct.txt'] + glob('cache/*/direct.txt')
 elif sys.argv[1] == '-f':
-    files = ['cache/failed.txt']
+    files = ['cache/failed.txt'] + glob('cache/*/failed.txt')
 elif sys.argv[1] == '-r':
-    files = ['cache/rules.txt']
+    files = ['cache/rules.txt'] + glob('cache/*/rules.txt')
 elif sys.argv[1] == '-h':
-    files = ['cache/history.txt']
+    files = ['cache/history.txt'] + glob('cache/*/history.txt')
 else:
-    print(help)
-    sys.exit()
+    sys.exit(help)
 
 for filename in files:
     del_line(filename, sys.argv[2])
