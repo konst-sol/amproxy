@@ -203,7 +203,7 @@ def _set_config_value(key, value):
         error(f'Неизвестная опция в конфиг-файле: {key}')
         return
     current_value = globals()[var_name]
-    # Сохраняем тип дефолтной переменной (int, float, str)
+    # Сохраняем тип дефолтной переменной (int, float, str, Path)
     target_type = type(current_value)
     try:
         # Пытаемся привести строку из конфига к типу дефолта
@@ -249,7 +249,7 @@ strategies = [] # список тестируемых стратегий
 # Служебные данные процессов
 params_to_port = {} # {params: port}
 active_processes = {} # {port: subprocess.Popen}
-#
+# Логирование
 log_manager = None # объект класса LogManager
 # Глобальный реестр доменов
 domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
@@ -813,11 +813,11 @@ class DomainRegistry:
             # кэш в подкаталоге с именем провайдера
             cache_path = CACHE_DIR / self._isp_name
         debug(f'каталог кэша: {cache_path}')
-        self.RULES_FILE = cache_path / RULES_FILE
-        self.DIRECT_FILE = cache_path / DIRECT_FILE
-        self.FAILED_FILE = cache_path / FAILED_FILE
-        self.HISTORY_FILE = cache_path / HISTORY_FILE
-        self.URLS_FILE = cache_path / URLS_FILE
+        self.rules_file = cache_path / RULES_FILE
+        self.direct_file = cache_path / DIRECT_FILE
+        self.failed_file = cache_path / FAILED_FILE
+        self.history_file = cache_path / HISTORY_FILE
+        self.urls_file = cache_path / URLS_FILE
 
     #
     # Методы dict
@@ -916,14 +916,14 @@ class DomainRegistry:
     def load_rules(self):
         debug('загрузка правил')
         with self._lock:
-            self._load(self.RULES_FILE, 'PROXY', True)
-            self._load(self.DIRECT_FILE, 'DIRECT')
-            self._load(self.FAILED_FILE, 'FAILED')
+            self._load(self.rules_file, 'PROXY', True)
+            self._load(self.direct_file, 'DIRECT')
+            self._load(self.failed_file, 'FAILED')
             self._load(USER_RULES_FILE, 'USER')
             info(f'[+] Загружены правила для {len(self)} доменов')
             # загружаем историю параметров
-            if self.HISTORY_FILE.exists():
-                with self.HISTORY_FILE.open(encoding='utf-8') as f:
+            if self.history_file.exists():
+                with self.history_file.open(encoding='utf-8') as f:
                     for s in f:
                         s = s.strip()
                         if not s: continue
@@ -933,8 +933,8 @@ class DomainRegistry:
                         if dom:
                             dom.history_params = params
             # загружаем urls
-            if self.URLS_FILE.exists():
-                with self.URLS_FILE.open(encoding='utf-8') as f:
+            if self.urls_file.exists():
+                with self.urls_file.open(encoding='utf-8') as f:
                     for url in f:
                         url = url.rstrip('\r\n')
                         parsed_url = urlparse(url)
@@ -945,21 +945,21 @@ class DomainRegistry:
     def save_rules(self):
         debug('сохранение правил')
         # Создаем CACHE_DIR, если его еще нет
-        self.RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.rules_file.parent.mkdir(parents=True, exist_ok=True)
         if BACKUP_FILES:
-            for fn in (self.RULES_FILE, self.DIRECT_FILE,
-                       self.FAILED_FILE, self.HISTORY_FILE):
+            for fn in (self.rules_file, self.direct_file,
+                       self.failed_file, self.history_file):
                 if fn.exists():
                     # Создаем резервную копию
                     # .with_suffix добавит/заменит расширение
                     bak_file = fn.with_suffix(fn.suffix + '.bak')
                     fn.replace(bak_file)
         # Записываем данные
-        with (self.RULES_FILE.open('w', encoding='utf-8') as r,
-              self.DIRECT_FILE.open('w', encoding='utf-8') as d,
-              self.FAILED_FILE.open('w', encoding='utf-8') as f,
-              self.HISTORY_FILE.open('w', encoding='utf-8') as h,
-              self.URLS_FILE.open('w', encoding='utf-8') as u):
+        with (self.rules_file.open('w', encoding='utf-8') as r,
+              self.direct_file.open('w', encoding='utf-8') as d,
+              self.failed_file.open('w', encoding='utf-8') as f,
+              self.history_file.open('w', encoding='utf-8') as h,
+              self.urls_file.open('w', encoding='utf-8') as u):
             for dom in self.values():
                 if dom.status == 'PROXY':
                     if not dom.user_config:
