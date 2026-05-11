@@ -11,7 +11,7 @@
 
 import sys, os, time
 from datetime import timedelta
-from pathlib import Path, PosixPath, WindowsPath
+from pathlib import Path
 from fnmatch import fnmatch
 # для сети
 import socket
@@ -205,12 +205,6 @@ def _set_config_value(key, value):
     current_value = globals()[var_name]
     # Сохраняем тип дефолтной переменной (int, float, str)
     target_type = type(current_value)
-    debug(f'target_type: {target_type}')
-    if target_type not in (int, float, str, PosixPath, WindowsPath):
-        # Переназначаем только переменные int, float и str
-        # PosixPath, WindowsPath для CACHE_DIR, USER_RULES_FILE, STRATEGIES_FILE
-        error(f'Неизвестная опция в конфиг-файле: {key}')
-        return
     try:
         # Пытаемся привести строку из конфига к типу дефолта
         globals()[var_name] = target_type(value)
