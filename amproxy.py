@@ -53,8 +53,6 @@ FAILED_FILE = 'failed.txt' # домены для которых стратеги
 HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
 URLS_FILE = 'urls.txt' # список urls, найденных при парсинге страницы
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
-# Конфигурационный файл
-CONFIG_FILE = 'amproxy.ini'
 # Динамическое изменение настроек при смене провайдера
 DYNAMIC_CONFIG = 1
 # Таймауты
@@ -70,7 +68,8 @@ FAILED_TTL = 8 # прямое подключение если стратегия
 LOG_LEVEL = 'INFO' # ERROR/INFO/DEBUG
 LOG_FILE = 'amproxy.log'
 
-# Определяем список имен параметров
+# Определяем список имен параметров для конфиг-файла
+# Сразу после настроек и до всего остального
 settings_list = []
 def get_settings_list():
     for k, v in globals().items():
@@ -78,6 +77,15 @@ def get_settings_list():
         if k.isupper() and type(v) in (int, float, str):
             settings_list.append(k)
 get_settings_list()
+
+# Конфигурационный файл
+CONFIG_FILE = 'amproxy.ini'
+# Секция в конфиг-файле
+CONFIG_SECTION = None
+# Домен для тестирования.
+# Если в ком. строке указан доп. аргумент (домен или url) - сервер не запускается,
+# и вместо этого производится подбор стратегии для указанного домена (без загрузки кэша)
+TESTED_DOMAIN = None
 
 # Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
@@ -87,9 +95,6 @@ STRATEGIES_FILE = Path(STRATEGIES_FILE)
 # </НАСТРОЙКИ>
 
 # <LOGGING>
-# Настраиваем логирование в самом начале,
-# чтобы дальше использовать info(), debug(), error()
-
 # Настройка вывода
 class LevelFormatter(logging.Formatter):
     # Форматы для разных уровней
@@ -160,29 +165,33 @@ class LogManager:
         if self.listener:
             self.listener.stop()
 
-log_manager = LogManager()
-
 # </LOGGING>
 
 # <CLI>
-args_parser = ArgumentParser() #description='Описание скрипта'
-args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
-args_parser.add_argument('-c', '--config', help='конфиг-файл')
-# дополнительный необязательный аргумент (проверяемый домен)
-group = args_parser.add_mutually_exclusive_group()
-group.add_argument('domain', nargs='?', help='домен для тестирования')
+def parse_cli_args():
+    debug('start')
+    global CONFIG_FILE, CONFIG_SECTION, TESTED_DOMAIN
+    args_parser = ArgumentParser() #description='Описание скрипта'
+    args_parser.add_argument('-c', '--config', help='конфиг-файл')
+    args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
+    # дополнительный необязательный аргумент (проверяемый домен)
+    group = args_parser.add_mutually_exclusive_group()
+    group.add_argument('domain', nargs='?', help='домен для тестирования')
 
-command_line_args = args_parser.parse_args()
-config_section = None
-if command_line_args.section:
-    config_section = command_line_args.section
-    info(f'[C] Используется раздел конфиг-файла: {config_section}')
-if command_line_args.config:
-    if Path(command_line_args.config).exists():
-        CONFIG_FILE = command_line_args.config
-        info(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
-    else:
-        error(f'Конфиг-файл {command_line_args.config} не найден')
+    command_line_args = args_parser.parse_args()
+    if command_line_args.config:
+        if Path(command_line_args.config).exists():
+            CONFIG_FILE = command_line_args.config
+            info(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
+        else:
+            error(f'Конфиг-файл {command_line_args.config} не найден')
+    if command_line_args.section:
+        CONFIG_SECTION = command_line_args.section
+        info(f'[C] Используется раздел конфиг-файла: {CONFIG_SECTION}')
+    if command_line_args.domain:
+        debug(TESTED_DOMAIN)
+        TESTED_DOMAIN = command_line_args.domain
+
 # </CLI>
 
 # <CONFIG_FILE>
@@ -208,27 +217,25 @@ def _set_config_value(key, value):
         error(f'Не удалось преобразовать {var_name} в {target_type.__name__}')
 
 # Считываем конфиг-файл
-if not os.path.exists(CONFIG_FILE):
-    info('Конфиг не найден. Создаем дефолтный')
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        f.write('[DEFAULT]\n\n')
-config = ConfigParser()
-config.read(CONFIG_FILE, encoding='utf-8')
+def read_config_file():
+    if not os.path.exists(CONFIG_FILE):
+        info('Конфиг не найден. Создаем дефолтный')
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            f.write('[DEFAULT]\n\n')
+    config = ConfigParser()
+    config.read(CONFIG_FILE, encoding='utf-8')
 
-# Считываем из раздела [DEFAULT]
-# (По умолчанию имена разделов чувствительны к регистру)
-for key, value in config.defaults().items():
-    _set_config_value(key, value)
-# считываем из раздела, указанного в ком. строке (-s <раздел>)
-if config_section:
-    if config.has_section(config_section):
-        for key, value in config.items(config_section):
-            _set_config_value(key, value)
-    else:
-        error(f'Раздел {config_section} не найден')
-
-# Если в конфиг-файле указан другой уровень логирования или путь к логу
-log_manager.upgrade()
+    # Считываем из раздела [DEFAULT]
+    # (По умолчанию имена разделов чувствительны к регистру)
+    for key, value in config.defaults().items():
+        _set_config_value(key, value)
+    # считываем из раздела, указанного в ком. строке (-s <раздел>)
+    if CONFIG_SECTION:
+        if config.has_section(CONFIG_SECTION):
+            for key, value in config.items(CONFIG_SECTION):
+                _set_config_value(key, value)
+        else:
+            error(f'Раздел {CONFIG_SECTION} не найден')
 
 def add_new_section(isp_name):
     # Дописывает новую секцию в конец конфиг-файла (для watch_network)
@@ -241,25 +248,20 @@ def add_new_section(isp_name):
 
 # </CONFIG_FILE>
 
-# Проверка необходимых файлов
-if not Path(CIADPI_EXE).exists():
-    sys.exit(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
-if not STRATEGIES_FILE.exists():
-    sys.exit(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
-
 # <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 strategies = [] # список тестируемых стратегий
 # Служебные данные процессов
 params_to_port = {} # {params: port}
 active_processes = {} # {port: subprocess.Popen}
+#
+log_manager = None # объект класса LogManager
 # Глобальный реестр доменов
 domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
 # </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 
 
 # <DEBUG>
-# Вывод статуса ciadpi, статистики использования стратегий
-# и добавления доменов в кэш
+# Вывод статуса ciadpi, статистики использования стратегий и добавления доменов в кэш
 # по Ctrl+Break для Windows
 # или kill -USR1 <PID> (pkill -USR1 -f amproxy.py) для *nix
 def print_status(signum, frame):
@@ -1023,10 +1025,6 @@ class DomainRegistry:
         # обновляем
         self.load_rules()
 
-# Глобальный реестр доменов
-domain_registry = DomainRegistry() # {domain: DomainInfo}
-
-
 def watch_file():
     # Мониторинг файла пользовательских стратегий
     filename = USER_RULES_FILE
@@ -1046,7 +1044,6 @@ def watch_file():
 
 # <DOMAINREGISTRY/>
 
-
 def load_strategies():
     # загрузка стратегий
     with STRATEGIES_FILE.open() as f:
@@ -1056,14 +1053,13 @@ def load_strategies():
             if s and s not in strategies: strategies.append(s)
     info(f'[+] Загружено {len(strategies)} стратегий')
 
-load_strategies()
-
 
 def watch_network():
     debug('запуск мониторинга сети')
     last_ip = None
     last_isp = None
     while True:
+        # Определяем IP (раз в 60-90 сек)
         current_ip = None
         try:
             current_ip = requests2.get('https://api.ipify.org', timeout=30
@@ -1085,16 +1081,16 @@ def watch_network():
             except Exception as err:
                 debug(f'isp: {err}')
             else:
-                # Если провайдер сменился - обновляем настройки
+                # Если провайдер сменился
                 if current_isp and current_isp != last_isp:
                     if last_isp:
                         info(f'[!] Смена провайдера: {last_isp} -> {current_isp}')
                     else:
                         info(f'[!] Провайдер: {current_isp}')
-                    add_new_section(current_isp)
+                    add_new_section(current_isp) # добавляем раздел в конфиг-файл
                     last_isp = current_isp
 
-                    domain_registry.set_isp(current_isp)
+                    domain_registry.set_isp(current_isp) # обновляем настройки
 
                 last_ip = current_ip
 
@@ -1103,6 +1099,7 @@ def watch_network():
 
 # EXTERN proxy
 def set_proxy_from_url(socket_obj, url):
+    # конфигурируем socket_obj для работы через прокси
     parsed_url = urlparse(url)
     # Проверка схемы
     proxy_types = {
@@ -1135,7 +1132,6 @@ def set_proxy_from_url(socket_obj, url):
         raise RuntimeError(f'Failed to configure proxy: {e}')
 
 
-#
 params_to_port_lock = threading.Lock()
 def get_params_to_port(params):
     # Безопасно извлекает или создает запись в params_to_port
@@ -1320,7 +1316,28 @@ def handle_client(client_socket):
             except Exception as err:
                 pass
 
+
+def init_app():
+    read_config_file()
+    # Обновляем логирование
+    # Если в конфиг-файле указан другой уровень логирования или путь к логу
+    log_manager.upgrade()
+
+    # Проверка необходимых файлов
+    if not Path(CIADPI_EXE).exists():
+        sys.exit(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+    if not STRATEGIES_FILE.exists():
+        sys.exit(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+
+    # Глобальный реестр доменов
+    global domain_registry
+    domain_registry = DomainRegistry() # {domain: DomainInfo}
+
+    load_strategies()
+
+
 def start_proxy():
+    init_app()
     # Загрузка кэша
     domain_registry.load_rules()
 
@@ -1365,6 +1382,8 @@ def start_proxy():
 # поиск стратегии для одного домена
 # кэш не загружается и не сохраняется
 def test_domain(url):
+    init_app()
+
     if not url.startswith(('http://', 'https://')):
         url = 'https://'+url
     parsed_url = urlparse(url)
@@ -1386,8 +1405,13 @@ def test_domain(url):
 
 #
 if __name__ == '__main__':
-    if command_line_args.domain:
-        test_domain(command_line_args.domain)
+    # Настраиваем логирование в самом начале,
+    # чтобы дальше можно было использовать info(), debug(), error()
+    log_manager = LogManager()
+    parse_cli_args()
+    if TESTED_DOMAIN:
+        # если в ком. строке указан домен
+        test_domain(TESTED_DOMAIN)
     else:
         start_proxy()
 
