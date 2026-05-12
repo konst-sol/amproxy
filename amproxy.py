@@ -22,8 +22,8 @@ from curl_cffi.requests.exceptions import RequestException
 import threading
 import subprocess
 import requests as requests2 # для watch_network. с requests из curl_cffi не работает
-# 16k
-from bs4 import BeautifulSoup
+import base64 # для аутентификации
+from bs4 import BeautifulSoup # 16k
 from urllib.parse import urljoin, urlparse
 # для логирования
 import logging, logging.handlers
@@ -39,6 +39,8 @@ from configparser import ConfigParser
 # дефолтные
 HOST = '127.0.0.1'
 PORT = 8888 # порт этой программы
+#USER_PASS = 'user:12345' # Учетные данные (логин:пароль)
+USER_PASS = '' # если пустая строка - не использовать аутентификацию
 STRATEGIES_FILE = 'params.txt'
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else './ciadpi'
 IMPERSONATE = 'chrome120' # каким браузером прикидываемся
@@ -53,8 +55,7 @@ FAILED_FILE = 'failed.txt' # домены для которых стратеги
 HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
 URLS_FILE = 'urls.txt' # список urls, найденных при парсинге страницы
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
-# Динамическое изменение настроек при смене провайдера
-DYNAMIC_CONFIG = 1
+DYNAMIC_CONFIG = 1 # 0/1 Динамическое изменение настроек/стратегий при смене провайдера
 # Таймауты
 DIRECT_TEST_TIMEOUT = 4. # таймаут для проверки доступности (секунды)
 PROXY_TEST_TIMEOUT = 5. # таймаут для поиска стратегии
@@ -78,6 +79,8 @@ def get_settings_list():
             settings_list.append(k)
 get_settings_list()
 
+# Закодированный логин:пароль
+AUTH_ENCODED = base64.b64encode(USER_PASS.encode()).decode() if USER_PASS else None
 # Конфигурационный файл
 CONFIG_FILE = 'amproxy.ini'
 # Секция в конфиг-файле
@@ -1223,21 +1226,44 @@ def handle_client(client_socket):
         except Exception: pass
         if not request: return
 
-        header_line = request.decode('iso-8859-1').split('\n')[0]
-        method = header_line.split(' ')[0]
+        request = request.decode('utf-8', errors='ignore')
+        lines = request.splitlines()
+        first_line = lines[0].split()
+        if len(first_line) < 3:
+            return
+        method, path, protocol = first_line
 
+        if AUTH_ENCODED: # Если аутентификация настроена
+            # Проверка авторизации
+            auth_header = None
+            for line in lines:
+                if line.lower().startswith('proxy-authorization: basic '):
+                    auth_header = line.split()[2]
+                    break
+            if auth_header != AUTH_ENCODED:
+                # Если пароль неверный, возвращаем 407
+                response = (
+                    'HTTP/1.1 407 Proxy Authentication Required\r\n'
+                    'Proxy-Authenticate: Basic realm="Proxy Server"\r\n'
+                    'Content-Length: 0\r\n'
+                    'Connection: close\r\n\r\n'
+                )
+                client_socket.sendall(response.encode())
+                client_socket.close()
+                return
+
+        # Парсим целевой хост и порт
         if method == 'CONNECT':
             # HTTPS: хост и порт берем из строки запроса
-            host_port = header_line.split(' ')[1]
-            # добавляем порт (443) если не указан
-            host, port = (host_port.split(':') + [443])[:2]
-            port = int(port)
             is_https = True
+            # добавляем порт (443) если не указан
+            host, port = (path.split(':') + [443])[:2]
+            port = int(port)
         else:
             # HTTP: ищем заголовок Host
             is_https = False
             host, port = None, 80
-            for line in request.decode('iso-8859-1').split('\r\n'):
+            for line in lines:
                 if line.lower().startswith('host: '):
                     parts = line.split(':')
                     host = parts[1].strip()
@@ -1291,7 +1317,25 @@ def handle_client(client_socket):
             client_socket.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
         else:
             # Для HTTP пробрасываем исходный запрос серверу
-            remote_socket.sendall(request)
+            # Исправляем запрос
+            filtered_lines = []
+            # если URL абсолютный (с http://), делаем его относительным
+            if path.startswith('http://'):
+                parsed_url = urlparse(path)
+                out_path = parsed_url.path if parsed_url.path else '/'
+                if parsed_url.query:
+                    out_path += '?' + parsed_url.query
+                filtered_lines.append(f'{method} {out_path} {protocol}')
+
+            # вырезаем Proxy-Auth заголовок
+            for line in lines[1:]:
+                # Пропускаем (удаляем) заголовки, относящиеся к прокси
+                if line.lower().startswith('proxy-'):
+                    continue
+                filtered_lines.append(line)
+            # формируем исправленный запрос
+            out_req = '\r\n'.join(filtered_lines) + '\r\n'
+            remote_socket.sendall(out_req.encode('utf-8'))
 
         # Двунаправленная пересылка
         th = threading.Thread(target=pipe, args=(client_socket, remote_socket, dom))
