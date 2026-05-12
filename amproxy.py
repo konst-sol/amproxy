@@ -80,7 +80,7 @@ def get_settings_list():
 get_settings_list()
 
 # Закодированный логин:пароль
-AUTH_ENCODED = base64.b64encode(USER_PASS.encode()).decode() if USER_PASS else None
+AUTH_ENCODED = None
 # Конфигурационный файл
 CONFIG_FILE = 'amproxy.ini'
 # Секция в конфиг-файле
@@ -211,7 +211,10 @@ def _set_config_value(key, value):
     try:
         # Пытаемся привести строку из конфига к типу дефолта
         globals()[var_name] = target_type(value)
-        info(f'[C] {var_name}: {value}')
+        if var_name == 'USER_PASS':
+            info(f'[C] {var_name}: [hidden]')
+        else:
+            info(f'[C] {var_name}: {value}')
     except ValueError:
         error(f'Не удалось преобразовать {var_name} в {target_type.__name__}')
 
@@ -1216,7 +1219,7 @@ def pipe(source, destination, dom):
             pass
 
 
-def handle_client(client_socket):
+def handle_client(client_socket, address):
     # обработка запроса клиента
     remote_socket = None
     try:
@@ -1233,7 +1236,10 @@ def handle_client(client_socket):
             return
         method, path, protocol = first_line
 
-        if AUTH_ENCODED: # Если аутентификация настроена
+        # Определяем, является ли адрес локальным
+        is_local = (address[0] == '127.0.0.1' or address[0] == '::1')
+        if AUTH_ENCODED and not is_local:
+            # Если аутентификация настроена и клиент НЕ локальный
             # Проверка авторизации
             auth_header = None
             for line in lines:
@@ -1383,11 +1389,16 @@ def start_proxy():
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
 
+    # Аутентификация
+    if USER_PASS:
+        global AUTH_ENCODED
+        # Закодированный логин:пароль
+        AUTH_ENCODED = base64.b64encode(USER_PASS.encode()).decode()
+        debug('используется аутентификация')
     # Запуск мониторинга сети. Смена настроек при изменении провайдера
     if DYNAMIC_CONFIG:
         thr = threading.Thread(target=watch_network, daemon=True)
         thr.start()
-
     # Запуск мониторинга пользовательского файла стратегий
     thr = threading.Thread(target=watch_file, daemon=True)
     thr.start()
@@ -1402,8 +1413,8 @@ def start_proxy():
 
     try:
         while True:
-            client_sock, _ = server.accept()
-            t = threading.Thread(target=handle_client, args=(client_sock,))
+            client_sock, addr = server.accept()
+            t = threading.Thread(target=handle_client, args=(client_sock,addr))
             t.daemon = True
             t.start()
     except KeyboardInterrupt:
