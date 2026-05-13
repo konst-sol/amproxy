@@ -224,7 +224,7 @@ def _set_config_value(key, value):
 
 # Считываем конфиг-файл
 def read_config_file():
-    if not os.path.exists(CONFIG_FILE):
+    if not Path(CONFIG_FILE).exists():
         info('Конфиг не найден. Создаем дефолтный')
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
@@ -1219,7 +1219,7 @@ def pipe(source, destination, dom):
         # мгновенно получит пустой байт и завершит цикл.
         try:
             destination.shutdown(socket.SHUT_WR)
-        except Exception as err:
+        except Exception:
             pass
 
 
@@ -1435,7 +1435,7 @@ def start_proxy():
 # </SERVER>
 
 # поиск стратегии для одного домена
-# кэш не загружается и не сохраняется
+# кэш не загружается
 def test_domain(url):
     init_app()
 
@@ -1454,8 +1454,10 @@ def test_domain(url):
     for domain in domain_registry:
         dom = domain_registry[domain]
         info(f'{domain} {dom.params or dom.status}')
+    info('')
 
     if UPDATE_CACHE:
+        # если в ком. строке указана опция -u
         debug('update cache')
         saved_domain_registry = DomainRegistry()
 
@@ -1474,12 +1476,13 @@ def test_domain(url):
         # переопределяем тестируемый домен
         for domain in domain_registry:
             dom = domain_registry[domain]
-            saved_domain_registry[domain] = dom
+            saved_dom = saved_domain_registry.get_domain_info(domain)
+            saved_dom._update(dom.status, dom.params)
         # сохраняем кэш
         saved_domain_registry.save_rules()
 
     log_manager.stop()
-    print(uptime('\ntime'))
+    print(uptime('time'))
 
 #
 if __name__ == '__main__':
