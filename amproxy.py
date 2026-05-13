@@ -89,8 +89,8 @@ CONFIG_SECTION = None
 # Если в ком. строке указан доп. аргумент (домен или url) - сервер не запускается,
 # и вместо этого производится подбор стратегии для указанного домена (без загрузки кэша)
 TESTED_DOMAIN = None
-
-UPDATE_CACHE = False # обновление кэша в режиме тестирования
+# Обновление кэша в режиме тестирования
+UPDATE_CACHE = False
 
 # Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
@@ -174,7 +174,6 @@ class LogManager:
 
 # <CLI>
 def parse_cli_args():
-    debug('start')
     global CONFIG_FILE, CONFIG_SECTION, TESTED_DOMAIN, UPDATE_CACHE
     args_parser = ArgumentParser() #description='Описание скрипта'
     args_parser.add_argument('-c', '--config', help='конфиг-файл')
@@ -1275,7 +1274,7 @@ def handle_client(client_socket, address):
             is_https = False
             host, port = None, 80
             for line in lines:
-                if line.lower().startswith('host: '):
+                if line.lower().startswith('host:'):
                     parts = line.split(':')
                     host = parts[1].strip()
                     if len(parts) > 2:
