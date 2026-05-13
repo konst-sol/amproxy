@@ -90,6 +90,8 @@ CONFIG_SECTION = None
 # и вместо этого производится подбор стратегии для указанного домена (без загрузки кэша)
 TESTED_DOMAIN = None
 
+UPDATE_CACHE = False # обновление кэша в режиме тестирования
+
 # Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
 USER_RULES_FILE = Path(USER_RULES_FILE)
@@ -173,10 +175,12 @@ class LogManager:
 # <CLI>
 def parse_cli_args():
     debug('start')
-    global CONFIG_FILE, CONFIG_SECTION, TESTED_DOMAIN
+    global CONFIG_FILE, CONFIG_SECTION, TESTED_DOMAIN, UPDATE_CACHE
     args_parser = ArgumentParser() #description='Описание скрипта'
     args_parser.add_argument('-c', '--config', help='конфиг-файл')
     args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
+    args_parser.add_argument('-u', '--update', action='store_true',
+                             help='обновлять кэш (в режиме тестирования)')
     # дополнительный необязательный аргумент (проверяемый домен)
     group = args_parser.add_mutually_exclusive_group()
     group.add_argument('domain', nargs='?', help='домен для тестирования')
@@ -192,8 +196,9 @@ def parse_cli_args():
         CONFIG_SECTION = command_line_args.section
         info(f'[C] Используется раздел конфиг-файла: {CONFIG_SECTION}')
     if command_line_args.domain:
-        debug(TESTED_DOMAIN)
         TESTED_DOMAIN = command_line_args.domain
+    if command_line_args.update:
+        UPDATE_CACHE = True
 
 # </CLI>
 
@@ -1450,6 +1455,29 @@ def test_domain(url):
     for domain in domain_registry:
         dom = domain_registry[domain]
         info(f'{domain} {dom.params or dom.status}')
+
+    if UPDATE_CACHE:
+        debug('update cache')
+        saved_domain_registry = DomainRegistry()
+
+        if DYNAMIC_CONFIG:
+            # определяем провайдера
+            current_ip = requests2.get('https://api.ipify.org', timeout=30).text.strip()
+            resp_url = f'http://ip-api.com/json/{current_ip}?fields=isp'
+            response = requests2.get(resp_url, timeout=30).json()
+            current_isp = response.get('isp')
+            debug(f'isp: {current_isp}')
+            # переопределяем каталог кэша
+            saved_domain_registry._isp_name = current_isp
+            saved_domain_registry._set_cache_path()
+        # загружаем кэш
+        saved_domain_registry.load_rules()
+        # переопределяем тестируемый домен
+        for domain in domain_registry:
+            dom = domain_registry[domain]
+            saved_domain_registry[domain] = dom
+        # сохраняем кэш
+        saved_domain_registry.save_rules()
 
     log_manager.stop()
     print(uptime('\ntime'))
