@@ -15,8 +15,10 @@
 * PySocks
 * curl_cffi
 * BeautifulSoup
+* requests
 
 ### Дополнительная информация
+* [Настройка прокси](docs/settings.md)
 * [Подробно как подбирается стратегия](docs/HOWITWORK.md)
 * [Пользовательский файл стратегий](docs/user_rules.md)
 
