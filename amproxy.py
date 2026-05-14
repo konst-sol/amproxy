@@ -1492,7 +1492,7 @@ def start_proxy():
             t.start()
     except KeyboardInterrupt:
         # Используем root-логгер или прямой print, так как потоки могут закрываться
-        print('Shutting down...')
+        info('Shutting down...')
         sys.exit(0)
     finally:
         server.close()
@@ -1500,7 +1500,7 @@ def start_proxy():
             p.terminate()
             #p.wait()
         domain_registry.save_rules()
-        print(uptime())
+        info(uptime())
 
 # </SERVER>
 
@@ -1551,9 +1551,8 @@ def test_domain(url):
         # сохраняем кэш
         saved_domain_registry.save_rules()
 
-    print(uptime('time'))
+    info(uptime('time'))
 
-#
 if __name__ == '__main__':
     # Настраиваем логирование в самом начале,
     # чтобы дальше можно было использовать info(), debug(), error()
