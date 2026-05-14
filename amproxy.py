@@ -29,11 +29,14 @@ from urllib.parse import urljoin, urlparse
 import logging, logging.handlers
 from logging import exception as print_exc
 import queue
+import atexit
 import signal
 # аргументы ком. строки
 from argparse import ArgumentParser
 # конфиг-файл
 from configparser import ConfigParser
+
+APP_NAME = 'amproxy'
 
 # <НАСТРОЙКИ>
 # дефолтные
@@ -57,7 +60,7 @@ URLS_FILE = 'urls.txt' # список urls, найденных при парси
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 DYNAMIC_CONFIG = 1 # 0/1 Динамическое изменение настроек/стратегий при смене провайдера
 # Таймауты
-DIRECT_TEST_TIMEOUT = 4. # таймаут для проверки доступности (секунды)
+DIRECT_TEST_TIMEOUT = 5. # таймаут для проверки доступности (секунды)
 PROXY_TEST_TIMEOUT = 5. # таймаут для поиска стратегии
 SCAN_PAGE_TIMEOUT = 20. # общее время обработки страницы при поиске стратегии
 CURL_THREAD_LIMIT = 10 # сколько потоков использовать для проверки стратегий
@@ -67,7 +70,7 @@ DIRECT_TTL = 7*24 # прямое подключение
 PROXY_TTL = 7*24 # подключение через ciadpi
 FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
 LOG_LEVEL = 'INFO' # ERROR/INFO/DEBUG
-LOG_FILE = 'amproxy.log'
+LOG_FILE = APP_NAME+'.log'
 
 # Определяем список имен параметров для конфиг-файла
 # Сразу после настроек и до всего остального
@@ -82,8 +85,10 @@ get_settings_list()
 # Закодированный логин:пароль
 AUTH_ENCODED = None
 # Конфигурационный файл
-CONFIG_FILE = 'amproxy.ini'
-# Секция в конфиг-файле
+CONFIG_NAME = APP_NAME+'.ini' # имя. не меняется
+CONFIG_PATH = None # путь к пользовательскому конфиг-файлу (объект Path)
+SYSTEM_CONFIG_PATH = None # путь к системному конфиг-файлу (объект Path)
+# Секция в конфиг-файле (определяется в ком. строке)
 CONFIG_SECTION = None
 # Домен для тестирования.
 # Если в ком. строке указан доп. аргумент (домен или url) - сервер не запускается,
@@ -124,9 +129,10 @@ class LogManager:
         console_handler.setFormatter(LevelFormatter())
 
         self.listener = logging.handlers.QueueListener(self.log_queue, console_handler)
-        self.listener.start()
         self.logger.addHandler(logging.handlers.QueueHandler(self.log_queue))
         self.logger.setLevel(LOG_LEVEL)
+        self.listener.start()
+        atexit.register(self.stop)
         # функции вывода логов
         global info, debug, error
         info = self.logger.info
@@ -166,31 +172,37 @@ class LogManager:
         self.logger.setLevel(level)
 
     def stop(self):
-        # Корректное завершение работы (важно для QueueListener)
-        if self.listener:
-            self.listener.stop()
+        # Безопасно останавливает listener, избегая гонки потоков при Ctrl+C.
+        # Проверяем, существует ли объект listener и инициализирован ли его поток
+        if self.listener and getattr(self.listener, "_thread", None) is not None:
+            try:
+                self.listener.stop()
+            except AttributeError:
+                # На случай, если поток исчез прямо во время вызова
+                pass
 
 # </LOGGING>
 
 # <CLI>
 def parse_cli_args():
-    global CONFIG_FILE, CONFIG_SECTION, TESTED_DOMAIN, UPDATE_CACHE
+    global CONFIG_PATH, CONFIG_SECTION, TESTED_DOMAIN, UPDATE_CACHE
     args_parser = ArgumentParser() #description='Описание скрипта'
     args_parser.add_argument('-c', '--config', help='конфиг-файл')
     args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
     args_parser.add_argument('-u', '--update', action='store_true',
-                             help='обновлять кэш (в режиме тестирования)')
+                             help='обновлять кэш (в режиме поиска стратегий)')
     # дополнительный необязательный аргумент (проверяемый домен)
     group = args_parser.add_mutually_exclusive_group()
-    group.add_argument('domain', nargs='?', help='домен для тестирования')
+    group.add_argument('domain', nargs='?', help='домен или url для поиска стратегий')
 
     command_line_args = args_parser.parse_args()
     if command_line_args.config:
-        if Path(command_line_args.config).exists():
-            CONFIG_FILE = command_line_args.config
-            info(f'[C] Используется конфиг-файл: {CONFIG_FILE}')
+        CONFIG_PATH = Path(command_line_args.config)
+        if CONFIG_PATH.is_file():
+            info(f'[C] Используется конфиг-файл: {CONFIG_PATH}')
         else:
-            error(f'Конфиг-файл {command_line_args.config} не найден')
+            error(f'Не найден конфиг-файл: {CONFIG_PATH}. Выход')
+            sys.exit(1)
     if command_line_args.section:
         CONFIG_SECTION = command_line_args.section
         info(f'[C] Используется раздел конфиг-файла: {CONFIG_SECTION}')
@@ -202,6 +214,49 @@ def parse_cli_args():
 # </CLI>
 
 # <CONFIG_FILE>
+def find_config_file():
+    # Поиск конфиг-файла в стандартных местах
+    global CONFIG_PATH, SYSTEM_CONFIG_PATH
+    # системный конфиг
+    if sys.platform == "win32":
+        SYSTEM_CONFIG_PATH = (Path(os.environ.get('ProgramData', 'C:\\ProgramData'))
+                              / APP_NAME / CONFIG_NAME)
+    else:
+        SYSTEM_CONFIG_PATH = Path('/etc/') / APP_NAME / CONFIG_NAME
+
+    # Аргумент командной строки
+    if CONFIG_PATH:
+        # установлен через аргумент cli
+        return
+    # Переменная окружения
+    env_path = os.getenv(APP_NAME+'_CONFIG')
+    if env_path and Path(env_path).is_file():
+        CONFIG_PATH = Path(env_path)
+        return
+    # Список мест для последовательного поиска
+    search_order = [
+        # Текущий рабочий каталог
+        Path.cwd() / CONFIG_NAME,
+        # Каталог, где лежит сам скрипт
+        Path(sys.argv[0]).parent / CONFIG_NAME,
+    ]
+    # в домашнем каталоге
+    if sys.platform == 'win32':
+        # без точки
+        home_dir = APP_NAME
+    else:
+        # с точкой
+        home_dir = '.'+APP_NAME
+    search_order.append(Path.home() / home_dir / CONFIG_NAME)
+    # Возвращаем первый существующий файл
+    for path in search_order:
+        if path.is_file():
+            CONFIG_PATH = path
+            return
+    # Если ничего не нашли, устанавливаем дефолтный путь для создания нового файла
+    CONFIG_PATH = Path.home() / home_dir / CONFIG_NAME
+
+
 def _set_config_value(key, value):
     # устанавливаем глобальные переменные из конфига
     var_name = key.upper()
@@ -224,12 +279,14 @@ def _set_config_value(key, value):
 
 # Считываем конфиг-файл
 def read_config_file():
-    if not Path(CONFIG_FILE).exists():
-        info('Конфиг не найден. Создаем дефолтный')
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+    find_config_file()
+    if not CONFIG_PATH.exists():
+        info(f'Конфиг не найден. Создаем дефолтный; {CONFIG_PATH}')
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
     config = ConfigParser()
-    config.read(CONFIG_FILE, encoding='utf-8')
+    config.read((SYSTEM_CONFIG_PATH, CONFIG_PATH), encoding='utf-8')
 
     # Считываем из раздела [DEFAULT]
     # (По умолчанию имена разделов чувствительны к регистру)
@@ -245,11 +302,11 @@ def read_config_file():
 
 def add_new_section(isp_name):
     # Дописывает новую секцию в конец конфиг-файла (для watch_network)
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         if f'\n[{isp_name}]' in f.read():
             return
     debug(f'Новый провайдер. Добавляем секцию [{isp_name}] в конфиг-файл')
-    with open(CONFIG_FILE, 'a', encoding='utf-8') as f:
+    with open(CONFIG_PATH, 'a', encoding='utf-8') as f:
         f.write(f'# Секция добавлена автоматически\n[{isp_name}]\n\n')
 
 # </CONFIG_FILE>
@@ -1012,7 +1069,7 @@ class DomainRegistry:
         # Обновление настроек
         # считываем настройки из раздела ISP
         config = ConfigParser()
-        config.read(CONFIG_FILE, encoding='utf-8')
+        config.read(CONFIG_PATH, encoding='utf-8')
         for key, value in config.items(isp_name):
             _set_config_value(key, value)
         # Обновление логирования
@@ -1375,9 +1432,11 @@ def init_app():
 
     # Проверка необходимых файлов
     if not Path(CIADPI_EXE).exists():
-        sys.exit(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+        sys.exit(1)
     if not STRATEGIES_FILE.exists():
-        sys.exit(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+        error(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+        sys.exit(1)
 
     # Глобальный реестр доменов
     global domain_registry
@@ -1422,14 +1481,15 @@ def start_proxy():
             t.daemon = True
             t.start()
     except KeyboardInterrupt:
-        info('Shutting down...')
+        # Используем root-логгер или прямой print, так как потоки могут закрываться
+        print('Shutting down...')
+        sys.exit(0)
     finally:
         server.close()
         for p in active_processes.values():
             p.terminate()
             #p.wait()
         domain_registry.save_rules()
-        log_manager.stop()
         print(uptime())
 
 # </SERVER>
@@ -1481,7 +1541,6 @@ def test_domain(url):
         # сохраняем кэш
         saved_domain_registry.save_rules()
 
-    log_manager.stop()
     print(uptime('time'))
 
 #
