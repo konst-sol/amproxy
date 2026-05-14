@@ -113,9 +113,19 @@ class LevelFormatter(logging.Formatter):
         logging.DEBUG: "[D] %(filename)s:%(lineno)d: %(funcName)s: %(message)s",
         logging.ERROR: "[E] %(filename)s:%(lineno)d: %(funcName)s: %(message)s",
     }
+
+    def __init__(self):
+        super().__init__()
+        # Создаем тяжелые объекты один раз при инициализации
+        self._formatters = {
+            level: logging.Formatter(fmt) for level, fmt in self.formats.items()
+        }
+        self._default_formatter = logging.Formatter(
+            "%(levelname)s: %(message)s"
+        )
+
     def format(self, record):
-        log_fmt = self.formats.get(record.levelno, "%(levelname)s: %(message)s")
-        formatter = logging.Formatter(log_fmt)
+        formatter = self._formatters.get(record.levelno, self._default_formatter)
         return formatter.format(record)
 
 class LogManager:
