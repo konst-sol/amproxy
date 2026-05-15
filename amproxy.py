@@ -49,11 +49,12 @@ STRATEGIES_FILE = 'params.txt'
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else 'ciadpi'
 CIADPI_PATH = '' # Путь к ciadpi (объект Path)
 IMPERSONATE = 'chrome120' # каким браузером прикидываемся
-CACHE_DIR = 'cache' # каталог для кэша
+APP_DIR = '' # служебный каталог программы (~/.amproxy) (объект Path)
+CACHE_DIR = '' # каталог для кэша (~/.amproxy/cache) (объект Path)
 # Файлы для кэширования информации о проверках по одному домену на строке
 # в скобках - формат строки
 RULES_FILE = 'rules.txt' # стратегии (домен<пробел>время_проведения_теста<пробел>стратегия)
-USER_RULES_FILE = 'user-rules.txt' # пользовательские стратегии (домен<пробел>стратегия)
+USER_RULES_FILE = '' # 'user-rules.txt' пользовательские стратегии (домен<пробел>стратегия)
 DIRECT_FILE = 'direct.txt' # домены доступные напрямую (домен<пробел>время_проведения_теста)
 FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
 HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
@@ -70,8 +71,9 @@ NUMBER_OF_TESTS = 2 # количество проверок прямой дос�
 DIRECT_TTL = 7*24 # прямое подключение
 PROXY_TTL = 7*24 # подключение через ciadpi
 FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
-LOG_LEVEL = 'INFO' # ERROR/INFO/DEBUG
-LOG_FILE = APP_NAME+'.log'
+LOG_LEVEL = 'INFO' # уровень логирования (CRITICAL/ERROR/INFO/DEBUG)
+LOG_DIR = '' # каталог для сохранения логов (~/.amproxy/log) (объект Path)
+LOG_FILE = APP_NAME+'.log' # если пустая строка - не логировать в файл
 
 # Определяем список имен параметров для конфиг-файла
 # Сразу после настроек и до всего остального
@@ -97,10 +99,6 @@ CONFIG_SECTION = None
 TESTED_DOMAIN = None
 # Обновление кэша в режиме тестирования
 UPDATE_CACHE = False
-# Переназначаем имена файлов в объекты Path
-CACHE_DIR = Path(CACHE_DIR)
-USER_RULES_FILE = Path(USER_RULES_FILE)
-STRATEGIES_FILE = Path(STRATEGIES_FILE)
 
 # </НАСТРОЙКИ>
 
@@ -157,8 +155,7 @@ class LogManager:
         handlers = []
         # Настройка вывода в файла
         if LOG_FILE:
-            log_path = CACHE_DIR / LOG_FILE
-            log_path.parent.mkdir(parents=True, exist_ok=True) # если CACHE_DIR ещё нет
+            log_path = LOG_DIR / LOG_FILE
             # Вывод в файл
             # размер лог-файла 100 КБ, храним 4 старые копии
             file_handler = logging.handlers.RotatingFileHandler(
@@ -195,13 +192,14 @@ class LogManager:
 
 # <CLI>
 def parse_cli_args():
-    global CONFIG_PATH, CONFIG_SECTION, TESTED_DOMAIN, UPDATE_CACHE
+    global CONFIG_PATH, CONFIG_SECTION, TESTED_DOMAIN, UPDATE_CACHE, APP_DIR
     args_parser = ArgumentParser() #description='Описание скрипта'
-    args_parser.add_argument('-c', '--config', help='конфиг-файл')
+    args_parser.add_argument('-d', '--app-dir', help='служебный каталог программы')
+    args_parser.add_argument('-c', '--config', help='путь к конфиг-файлу')
     args_parser.add_argument('-s', '--section', help='раздел в конфиг-файле')
     args_parser.add_argument('-u', '--update', action='store_true',
                              help='обновлять кэш (в режиме поиска стратегий)')
-    # дополнительный необязательный аргумент (проверяемый домен)
+    # дополнительный необязательный аргумент (проверяемый домен/url)
     group = args_parser.add_mutually_exclusive_group()
     group.add_argument('domain', nargs='?', help='домен или url для поиска стратегий')
 
@@ -220,10 +218,21 @@ def parse_cli_args():
         TESTED_DOMAIN = command_line_args.domain
     if command_line_args.update:
         UPDATE_CACHE = True
+    if command_line_args.app_dir:
+        APP_DIR = command_line_args.app_dir
 
 # </CLI>
 
 # <CONFIG_FILE>
+def get_app_dir():
+    if sys.platform == 'win32':
+        # без точки
+        app_dir = APP_NAME
+    else:
+        # с точкой
+        app_dir = '.'+APP_NAME
+    return Path.home() / app_dir
+
 def find_config_file():
     # Поиск конфиг-файла в стандартных местах
     global CONFIG_PATH, SYSTEM_CONFIG_PATH
@@ -251,20 +260,15 @@ def find_config_file():
         Path(sys.argv[0]).parent / CONFIG_NAME,
     ]
     # в домашнем каталоге
-    if sys.platform == 'win32':
-        # без точки
-        home_dir = APP_NAME
-    else:
-        # с точкой
-        home_dir = '.'+APP_NAME
-    search_order.append(Path.home() / home_dir / CONFIG_NAME)
+    app_dir = get_app_dir()
+    search_order.append(app_dir / CONFIG_NAME)
     # Возвращаем первый существующий файл
     for path in search_order:
         if path.is_file():
             CONFIG_PATH = path
             return
     # Если ничего не нашли, устанавливаем дефолтный путь для создания нового файла
-    CONFIG_PATH = Path.home() / home_dir / CONFIG_NAME
+    CONFIG_PATH = app_dir / CONFIG_NAME
 
 
 def _set_config_value(key, value):
@@ -292,7 +296,6 @@ def read_config_file():
     find_config_file()
     if not CONFIG_PATH.exists():
         info(f'Конфиг не найден. Создаем дефолтный; {CONFIG_PATH}')
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
     config = ConfigParser()
@@ -1021,8 +1024,6 @@ class DomainRegistry:
 
     def save_rules(self):
         debug('сохранение правил')
-        # Создаем CACHE_DIR, если его еще нет
-        self.rules_file.parent.mkdir(parents=True, exist_ok=True)
         if BACKUP_FILES:
             for fn in (self.rules_file, self.direct_file,
                        self.failed_file, self.history_file):
@@ -1459,11 +1460,26 @@ def find_ciadpi_exe():
     # Если нигде не нашли, CIADPI_PATH остается пустой строкой
 
 def init_app():
+    global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
     read_config_file()
+    # определяем служебный каталог
+    if APP_DIR:
+        # определен в конфиге или ком. строке
+        APP_DIR = Path(APP_DIR)
+    else:
+        APP_DIR = get_app_dir()
+    info(f'[C] служебный каталог: {APP_DIR}')
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR = Path(CACHE_DIR) if CACHE_DIR else APP_DIR / 'cache'
+    CACHE_DIR.mkdir(exist_ok=True)
+    LOG_DIR = Path(LOG_DIR) if LOG_DIR else APP_DIR / 'log'
+    LOG_DIR.mkdir(exist_ok=True)
+    USER_RULES_FILE = (Path(USER_RULES_FILE) if USER_RULES_FILE
+                       else APP_DIR / 'user-rules.txt')
+    STRATEGIES_FILE = Path(STRATEGIES_FILE)
     # Обновляем логирование
     # Если в конфиг-файле указан другой уровень логирования или путь к логу
     log_manager.upgrade()
-
     # Проверка необходимых файлов
     find_ciadpi_exe()
     if CIADPI_PATH:
