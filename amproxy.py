@@ -10,6 +10,7 @@
 # ///
 
 import sys, os, time
+import shutil
 from datetime import timedelta
 from pathlib import Path
 from fnmatch import fnmatch
@@ -45,10 +46,10 @@ PORT = 8888 # порт этой программы
 #USER_PASS = 'user:12345' # Учетные данные (логин:пароль)
 USER_PASS = '' # если пустая строка - не использовать аутентификацию
 STRATEGIES_FILE = 'params.txt'
-CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else './ciadpi'
+CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else 'ciadpi'
+CIADPI_PATH = '' # Путь к ciadpi (объект Path)
 IMPERSONATE = 'chrome120' # каким браузером прикидываемся
-# каталог для кэша
-CACHE_DIR = 'cache'
+CACHE_DIR = 'cache' # каталог для кэша
 # Файлы для кэширования информации о проверках по одному домену на строке
 # в скобках - формат строки
 RULES_FILE = 'rules.txt' # стратегии (домен<пробел>время_проведения_теста<пробел>стратегия)
@@ -96,7 +97,6 @@ CONFIG_SECTION = None
 TESTED_DOMAIN = None
 # Обновление кэша в режиме тестирования
 UPDATE_CACHE = False
-
 # Переназначаем имена файлов в объекты Path
 CACHE_DIR = Path(CACHE_DIR)
 USER_RULES_FILE = Path(USER_RULES_FILE)
@@ -1434,6 +1434,30 @@ def handle_client(client_socket, address):
                 pass
 
 
+def find_ciadpi_exe():
+    # Ищем бинарник ciadpi в каталоге приложения или в системном $PATH
+    global CIADPI_PATH
+    if CIADPI_PATH:
+        # определен в конфиг-файле
+        return
+    # Определяем каталог, где физически расположена программа
+    # sys.argv[0] или __file__ возвращают путь к запущенному скрипту
+    app_dir = Path(sys.argv[0]).parent.resolve()
+    local_binary_path = app_dir / CIADPI_EXE
+    # Проверяем, есть ли бинарник прямо в каталоге с программой
+    if local_binary_path.is_file():
+        if os.access(local_binary_path, os.X_OK):
+            # файл существует и является исполнимым
+            CIADPI_PATH = local_binary_path
+            return
+        error(f'{local_binary_path} существует, но не является исполнимым')
+    # Ищем бинарник в системных каталогах среды окружения ($PATH / %PATH%)
+    # shutil.which автоматически учитывает расширения .exe/.cmd на Windows
+    system_binary_str = shutil.which(CIADPI_EXE)
+    if system_binary_str:
+        CIADPI_PATH = Path(system_binary_str)
+    # Если нигде не нашли, CIADPI_PATH остается пустой строкой
+
 def init_app():
     read_config_file()
     # Обновляем логирование
@@ -1441,7 +1465,10 @@ def init_app():
     log_manager.upgrade()
 
     # Проверка необходимых файлов
-    if not Path(CIADPI_EXE).exists():
+    find_ciadpi_exe()
+    if CIADPI_PATH:
+        debug(f'путь к ciadpi: {CIADPI_PATH}')
+    else:
         error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
         sys.exit(1)
     if not STRATEGIES_FILE.exists():
