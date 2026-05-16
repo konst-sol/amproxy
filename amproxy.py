@@ -45,7 +45,7 @@ HOST = '127.0.0.1'
 PORT = 8888 # порт этой программы
 #USER_PASS = 'user:12345' # Учетные данные (логин:пароль)
 USER_PASS = '' # если пустая строка - не использовать аутентификацию
-STRATEGIES_FILE = 'params.txt'
+STRATEGIES_FILE = 'params.txt' # файл со списком параметров для ciadpi (объект Path)
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else 'ciadpi'
 CIADPI_PATH = '' # Путь к ciadpi (объект Path)
 IMPERSONATE = 'chrome120' # каким браузером прикидываемся
@@ -85,6 +85,7 @@ def get_settings_list():
             settings_list.append(k)
 get_settings_list()
 
+# Остальные параметры, неиспользуемые в конфиг-файле
 # Закодированный логин:пароль
 AUTH_ENCODED = None
 # Конфигурационный файл
@@ -93,11 +94,11 @@ CONFIG_PATH = None # путь к пользовательскому конфиг
 SYSTEM_CONFIG_PATH = None # путь к системному конфиг-файлу (объект Path)
 # Секция в конфиг-файле (определяется в ком. строке)
 CONFIG_SECTION = None
-# Домен для тестирования.
+# Домен для поиска стратегий.
 # Если в ком. строке указан доп. аргумент (домен или url) - сервер не запускается,
 # и вместо этого производится подбор стратегии для указанного домена (без загрузки кэша)
 TESTED_DOMAIN = None
-# Обновление кэша в режиме тестирования
+# Обновление кэша в режиме поиска стратегий
 UPDATE_CACHE = False
 
 # </НАСТРОЙКИ>
@@ -274,7 +275,7 @@ def find_config_file():
 def _set_config_value(key, value):
     # устанавливаем глобальные переменные из конфига
     var_name = key.upper()
-    # Проверяем существует ли уже такая переменная в глобальном пространстве
+    # Проверяем существует ли уже такая переменная в списке настроек
     if var_name not in settings_list:
         error(f'Неизвестная опция в конфиг-файле: {key}')
         return
@@ -1096,6 +1097,8 @@ class DomainRegistry:
         # новые пути к файлам кэша
         self._isp_name = isp_name
         self._set_cache_path()
+        # Создаем каталог кэша, если его еще нет
+        self.rules_file.parent.mkdir(parents=True, exist_ok=True)
         # обновляем
         self.load_rules()
 
