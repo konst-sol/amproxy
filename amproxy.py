@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- mode: python; coding: utf-8; -*-
 # /// script
 # requires-python = ">=3.9"
 # dependencies = [
@@ -31,7 +32,6 @@ import logging, logging.handlers
 from logging import exception as print_exc
 import queue
 import atexit
-import signal
 # аргументы ком. строки
 from argparse import ArgumentParser
 # конфиг-файл
@@ -45,6 +45,7 @@ HOST = '127.0.0.1'
 PORT = 8888 # порт этой программы
 #USER_PASS = 'user:12345' # Учетные данные (логин:пароль)
 USER_PASS = '' # если пустая строка - не использовать аутентификацию
+CONTROL_PORT = 0 # порт на котором программа слушает управление
 STRATEGIES_FILE = 'params.txt' # файл со списком параметров для ciadpi (объект Path)
 CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else 'ciadpi'
 CIADPI_PATH = '' # Путь к ciadpi (объект Path)
@@ -339,33 +340,16 @@ domain_registry = None # объект класса DomainRegistry {domain: Domai
 
 # <DEBUG>
 # Вывод статуса ciadpi, статистики использования стратегий и добавления доменов в кэш
-# по Ctrl+Break для Windows
-# или kill -USR1 <PID> (pkill -USR1 -f amproxy.py) для *nix
-def print_status(signum, frame):
-    # Функция-обработчик сигнала для вывода информации
-    print_ciadpi_status()
-    print_params_stat()
-    print_summary()
-
-# Регистрация обработчика
-def regsig():
-    if sys.platform == 'win32':
-        # В Windows SIGUSR1 нет, используем SIGBREAK (Ctrl+Break)
-        signal.signal(signal.SIGBREAK, print_status)
-    else:
-        # В Linux/MacOS используем SIGUSR1 (kill -USR1 PID)
-        signal.signal(signal.SIGUSR1, print_status)
-
 def print_ciadpi_status():
-    info('\n' + '='*50)
-    info(' СТАТУС ЗАРЕГИСТРИРОВАННЫХ ПРОЦЕССОВ ciadpi')
-    info('='*50)
-
+    out = []
+    out.append('='*50)
+    out.append(' СТАТУС ЗАРЕГИСТРИРОВАННЫХ ПРОЦЕССОВ ciadpi')
+    out.append('='*50)
     if not active_processes:
-        info(' Активных процессов ciadpi нет.')
+        out.append(' Активных процессов ciadpi нет.')
     else:
-        info(f"{'PORT':<8} | {'PID':<8} | {'PARAMS'}")
-        info('-' * 50)
+        out.append(f"{'PORT':<8} | {'PID':<8} | {'PARAMS'}")
+        out.append('-' * 50)
         # Собираем данные из словарей params_to_port и active_processes
         # Для удобства создадим обратный маппинг портов в параметры
         port_to_params = {v: k for k, v in params_to_port.items()}
@@ -374,13 +358,15 @@ def print_ciadpi_status():
             params = port_to_params.get(port, 'неизвестно')
             # Проверяем, живой ли процесс на самом деле
             status = 'LIVE' if proc.poll() is None else 'DEAD'
-            info(f'{port:<8} | {pid:<8} | {params} [{status}]')
-    info('='*50 + '\n')
+            out.append(f'{port:<8} | {pid:<8} | {params} [{status}]')
+    out.append('='*50)
+    return '\n'.join(out)
 
 def print_params_stat():
-    info('='*50)
-    info('СТАТИСТИКА ИСПОЛЬЗОВАНИЯ СТРАТЕГИЙ')
-    info('='*50)
+    out = []
+    out.append('='*50)
+    out.append(' СТАТИСТИКА ИСПОЛЬЗОВАНИЯ СТРАТЕГИЙ')
+    out.append('='*50)
     stat = {}
     for domain in domain_registry:
         dom = domain_registry[domain]
@@ -389,11 +375,12 @@ def print_params_stat():
             stat[dom.params] += 1
         else:
             stat[dom.params] = 1
-    info(f"{'NUM':<3} | {'PARAMS'}")
-    info('-' * 50)
+    out.append(f"{'NUM':<3} | {'PARAMS'}")
+    out.append('-' * 50)
     for d, n in sorted(stat.items(), key=lambda item: item[1]):
-        info(f'{n:<3} | {d}')
-    info('='*50+'\n')
+        out.append(f'{n:<3} | {d}')
+    out.append('='*50+'\n')
+    return '\n'.join(out)
 
 # summary
 summary = {
@@ -407,27 +394,28 @@ def update_summary(status, domain):
     with summary_lock:
         summary[status].append(domain)
 def print_summary():
-    info('='*50)
-    info('ДОБАВЛЕНЫ ДОМЕНЫ ЗА ЭТОТ СЕАНС')
-    info('='*50)
+    out = []
+    out.append('='*50)
+    out.append(' ДОБАВЛЕНЫ ДОМЕНЫ ЗА ЭТОТ СЕАНС')
+    out.append('='*50)
     for s in summary:
         if not summary[s]:
             continue
         if s == 'UPDATE':
-            info('Обновлены:')
-            info('\n'.join(f'  {i}' for i in summary[s]))
+            out.append('Обновлены:')
+            out.append('\n'.join(f'  {i}' for i in summary[s]))
         elif s == 'PROXY':
-            info('В категорию PROXY добавлены:')
+            out.append('В категорию PROXY добавлены:')
             for d in summary[s]:
                 dom = domain_registry.get(d)
                 if dom is not None:
-                    info(f'  {d} ({dom.params})')
+                    out.append(f'  {d} ({dom.params})')
                 else:
-                    info(f'  {d} (не зарегистрирован)')
+                    out.append(f'  {d} (не зарегистрирован)')
         else:
-            info(f'В категорию {s} добавлены:')
-            info('\n'.join(f'  {i}' for i in summary[s]))
-    info(f'\n{uptime()}\n')
+            out.append(f'В категорию {s} добавлены:')
+            out.append('\n'.join(f'  {i}' for i in summary[s]))
+    return '\n'.join(out)
 
 start_time = time.time()
 def uptime(txt='Uptime'):
@@ -1307,7 +1295,7 @@ def handle_client(client_socket, address):
         request = request.decode('utf-8', errors='ignore')
         lines = request.splitlines()
         first_line = lines[0].split()
-        if len(first_line) < 3:
+        if len(first_line) != 3:
             return
         method, path, protocol = first_line
 
@@ -1500,6 +1488,28 @@ def init_app():
 
     load_strategies()
 
+def control_server():
+    # админка
+    control_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    control_sock.bind(('127.0.0.1', CONTROL_PORT))
+    control_sock.listen()
+    info(f'[Control] Сервер управления запущен на 127.0.0.1:{CONTROL_PORT}')
+    while True:
+        conn, addr = control_sock.accept()
+        data = conn.recv(1024).decode('utf-8').strip()
+        if data == 'ciadpi':
+            conn.sendall(f'{print_ciadpi_status()}'.encode('utf-8'))
+        elif data == 'stats':
+            conn.sendall(f'{print_params_stat()}'.encode('utf-8'))
+        elif data == 'uptime':
+            conn.sendall(f'{uptime()}'.encode('utf-8'))
+        elif data == 'summary':
+            conn.sendall(f'{print_summary()}'.encode('utf-8'))
+        else:
+            conn.sendall(f'ERROR: Unknown command: {data}'.encode('utf-8'))
+        conn.close()
+
 
 def start_proxy():
     init_app()
@@ -1516,18 +1526,18 @@ def start_proxy():
         debug('используется аутентификация')
     # Запуск мониторинга сети. Смена настроек при изменении провайдера
     if DYNAMIC_CONFIG:
-        thr = threading.Thread(target=watch_network, daemon=True)
-        thr.start()
+        threading.Thread(target=watch_network, daemon=True).start()
     # Запуск мониторинга пользовательского файла стратегий
-    thr = threading.Thread(target=watch_file, daemon=True)
-    thr.start()
+    threading.Thread(target=watch_file, daemon=True).start()
+    # Запуск админки
+    if CONTROL_PORT:
+        threading.Thread(target=control_server, daemon=True).start()
 
     # Запуск сервера
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
-    regsig() # регистрация SIGUSR1 / SIGBREAK
     info(f'[*] Прокси готов на порту {PORT}')
 
     try:
@@ -1537,7 +1547,7 @@ def start_proxy():
             t.daemon = True
             t.start()
     except KeyboardInterrupt:
-        # Используем root-логгер или прямой print, так как потоки могут закрываться
+        # нужно? (Используем root-логгер или прямой print, так как потоки могут закрываться)
         info('Shutting down...')
         sys.exit(0)
     finally:
