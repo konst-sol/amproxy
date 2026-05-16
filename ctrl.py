@@ -44,8 +44,8 @@ def main():
         description='Утилита для управления прокси-сервером.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='Примеры использования:\n'
-               '  python ctrl.py reload\n'
-               '  python ctrl.py status --host 192.168.1.50 --port 9999'
+               '  python ctrl.py uptime\n'
+               '  python ctrl.py stats --host 192.168.1.50 --port 9999'
     )
     # Обязательный аргумент — сама команда
     parser.add_argument(

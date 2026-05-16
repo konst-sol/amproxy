@@ -21,6 +21,7 @@ import socks
 import asyncio
 from curl_cffi import requests, CurlError
 from curl_cffi.requests.exceptions import RequestException
+import signal
 import threading
 import subprocess
 import requests as requests2 # для watch_network. с requests из curl_cffi не работает
@@ -340,7 +341,7 @@ domain_registry = None # объект класса DomainRegistry {domain: Domai
 
 # <DEBUG>
 # Вывод статуса ciadpi, статистики использования стратегий и добавления доменов в кэш
-def print_ciadpi_status():
+def info_ciadpi_status():
     out = []
     out.append('='*50)
     out.append(' СТАТУС ЗАРЕГИСТРИРОВАННЫХ ПРОЦЕССОВ ciadpi')
@@ -362,7 +363,7 @@ def print_ciadpi_status():
     out.append('='*50)
     return '\n'.join(out)
 
-def print_params_stat():
+def info_params_stat():
     out = []
     out.append('='*50)
     out.append(' СТАТИСТИКА ИСПОЛЬЗОВАНИЯ СТРАТЕГИЙ')
@@ -393,7 +394,7 @@ summary_lock = threading.Lock()
 def update_summary(status, domain):
     with summary_lock:
         summary[status].append(domain)
-def print_summary():
+def info_summary():
     out = []
     out.append('='*50)
     out.append(' ДОБАВЛЕНЫ ДОМЕНЫ ЗА ЭТОТ СЕАНС')
@@ -1488,6 +1489,7 @@ def init_app():
 
     load_strategies()
 
+
 def control_server():
     # админка
     control_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1499,13 +1501,15 @@ def control_server():
         conn, addr = control_sock.accept()
         data = conn.recv(1024).decode('utf-8').strip()
         if data == 'ciadpi':
-            conn.sendall(f'{print_ciadpi_status()}'.encode('utf-8'))
+            conn.sendall(info_ciadpi_status().encode('utf-8'))
         elif data == 'stats':
-            conn.sendall(f'{print_params_stat()}'.encode('utf-8'))
-        elif data == 'uptime':
-            conn.sendall(f'{uptime()}'.encode('utf-8'))
+            conn.sendall(info_params_stat().encode('utf-8'))
         elif data == 'summary':
-            conn.sendall(f'{print_summary()}'.encode('utf-8'))
+            conn.sendall(info_summary().encode('utf-8'))
+        elif data == 'uptime':
+            conn.sendall(uptime().encode('utf-8'))
+        elif data == 'pid':
+            conn.sendall(f'PID: {os.getpid()}'.encode('utf-8'))
         else:
             conn.sendall(f'ERROR: Unknown command: {data}'.encode('utf-8'))
         conn.close()
@@ -1533,6 +1537,11 @@ def start_proxy():
     if CONTROL_PORT:
         threading.Thread(target=control_server, daemon=True).start()
 
+    # перехват SIGTERM
+    def handle_sigterm(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
     # Запуск сервера
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1543,8 +1552,8 @@ def start_proxy():
     try:
         while True:
             client_sock, addr = server.accept()
-            t = threading.Thread(target=handle_client, args=(client_sock,addr))
-            t.daemon = True
+            t = threading.Thread(target=handle_client, args=(client_sock,addr),
+                                 daemon=True)
             t.start()
     except KeyboardInterrupt:
         # нужно? (Используем root-логгер или прямой print, так как потоки могут закрываться)
