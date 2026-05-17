@@ -76,6 +76,10 @@ FAILED_TTL = 8 # прямое подключение если стратегия
 LOG_LEVEL = 'INFO' # уровень логирования (CRITICAL/ERROR/INFO/DEBUG)
 LOG_DIR = '' # каталог для сохранения логов (~/.amproxy/log) (объект Path)
 LOG_FILE = APP_NAME+'.log' # если пустая строка - не логировать в файл
+# форматы вывода для разных уровней
+LOG_INFO_FORMAT = '%(message)s'
+LOG_DEBUG_FORMAT = '[D] %(filename)s:%(lineno)d: %(funcName)s: %(message)s'
+LOG_ERROR_FORMAT = '[E] %(filename)s:%(lineno)d: %(funcName)s: %(message)s'
 
 # Определяем список имен параметров для конфиг-файла
 # Сразу после настроек и до всего остального
@@ -105,44 +109,49 @@ UPDATE_CACHE = False
 
 # </НАСТРОЙКИ>
 
+
 # <LOGGING>
 # Настройка вывода
 class LevelFormatter(logging.Formatter):
-    # Форматы для разных уровней
-    formats = {
-        logging.INFO: "%(message)s",
-        logging.DEBUG: "[D] %(filename)s:%(lineno)d: %(funcName)s: %(message)s",
-        logging.ERROR: "[E] %(filename)s:%(lineno)d: %(funcName)s: %(message)s",
-    }
-
     def __init__(self):
+        # формат времени
+        # date_fmt = '%Y-%m-%d %H:%M:%S' # вместе с датой
+        date_fmt = '%H:%M:%S' # только время
         super().__init__()
         # Создаем тяжелые объекты один раз при инициализации
-        self._formatters = {
-            level: logging.Formatter(fmt) for level, fmt in self.formats.items()
-        }
+        self._formatters = {}
+        for level, fmt in (
+                (logging.INFO, LOG_INFO_FORMAT),
+                (logging.DEBUG, LOG_DEBUG_FORMAT),
+                (logging.ERROR, LOG_ERROR_FORMAT),
+                ):
+            self._formatters[level] = logging.Formatter(fmt, datefmt=date_fmt)
+
         self._default_formatter = logging.Formatter(
-            "%(levelname)s: %(message)s"
+            '%(levelname)s: %(message)s'
         )
 
     def format(self, record):
         formatter = self._formatters.get(record.levelno, self._default_formatter)
         return formatter.format(record)
 
+
+
 class LogManager:
     def __init__(self):
-        # Безопасное логирование через очередь сообщений
-        self.log_queue = queue.Queue()
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(LOG_LEVEL.upper())
+        # Очищаем старые хэндлеры, если они были (например, после basicConfig)
+        #self.logger.handlers.clear()
+        # Настраиваем обычное прямое логирование в консоль
+        self.console_handler = logging.StreamHandler()
+        self.console_handler.setFormatter(LevelFormatter())
+        self.logger.addHandler(self.console_handler)
+        # Переменные для будущего апгрейда
+        self.log_queue = None
+        self.queue_handler = None
         self.listener = None
-        # Временная настройка вывода в консоль до загрузки конфига
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(LevelFormatter())
-
-        self.listener = logging.handlers.QueueListener(self.log_queue, console_handler)
-        self.logger.addHandler(logging.handlers.QueueHandler(self.log_queue))
-        self.logger.setLevel(LOG_LEVEL)
-        self.listener.start()
+        # останавливаем логирование на выходе
         atexit.register(self.stop)
         # функции вывода логов
         global info, debug, error
@@ -151,12 +160,22 @@ class LogManager:
         error = self.logger.error
 
     def upgrade(self):
-        # Настройка после чтения конфига
+        # Переводит логирование на асинхронную очередь с выводом в консоль
+        # и (опционально) в файл
         # Останавливаем старый listener
         if self.listener:
             self.listener.stop()
-        handlers = []
-        # Настройка вывода в файла
+
+        # Удаляем прямой консольный хэндлер из логгера, чтобы избежать дублирования
+        if self.console_handler in self.logger.handlers:
+            self.logger.removeHandler(self.console_handler)
+        self.console_handler.setFormatter(LevelFormatter()) # если в конфиге поменялся формат
+
+        # Готовим список конечных получателей для Listener'а
+        # Возвращаем наш консольный хэндлер (теперь им будет управлять Listener)
+        dest_handlers = [self.console_handler]
+
+        # Если задан файл — создаем файловый хэндлер и добавляем его в список
         if LOG_FILE:
             log_path = LOG_DIR / LOG_FILE
             # Вывод в файл
@@ -165,21 +184,19 @@ class LogManager:
                 log_path, maxBytes=100*1024, backupCount=4, encoding='utf-8'
             )
             file_handler.setFormatter(LevelFormatter())
-            handlers.append(file_handler)
-
-        # Настройка вывода в консоль
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(LevelFormatter())
-        handlers.append(console_handler)
-
-        # Запуск нового listener
-        # listener будет забирать логи из очереди и отдавать их в ротатор
-        self.listener = logging.handlers.QueueListener(self.log_queue, *handlers)
-        self.listener.start()
-
+            dest_handlers.append(file_handler)
+        # Настраиваем инфраструктуру очереди
+        self.log_queue = queue.Queue()
+        # Создаем QueueHandler и подключаем его к логгеру
+        self.queue_handler = logging.handlers.QueueHandler(self.log_queue)
+        self.logger.addHandler(self.queue_handler)
+        # Создаем и запускаем QueueListener, передав ему все конечные хэндлеры
+        self.listener = logging.handlers.QueueListener(self.log_queue, *dest_handlers)
         # Обновление уровня
         level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
         self.logger.setLevel(level)
+
+        self.listener.start()
 
     def stop(self):
         # Безопасно останавливает listener, избегая гонки потоков при Ctrl+C.
@@ -210,13 +227,13 @@ def parse_cli_args():
     if command_line_args.config:
         CONFIG_PATH = Path(command_line_args.config)
         if CONFIG_PATH.is_file():
-            info(f'[C] Используется конфиг-файл: {CONFIG_PATH}')
+            info(f'[Config] Используется конфиг-файл: {CONFIG_PATH}')
         else:
             error(f'Не найден конфиг-файл: {CONFIG_PATH}. Выход')
             sys.exit(1)
     if command_line_args.section:
         CONFIG_SECTION = command_line_args.section
-        info(f'[C] Используется раздел конфиг-файла: {CONFIG_SECTION}')
+        info(f'[Config] Используется раздел конфиг-файла: {CONFIG_SECTION}')
     if command_line_args.domain:
         TESTED_DOMAIN = command_line_args.domain
     if command_line_args.update:
@@ -263,15 +280,15 @@ def find_config_file():
         Path(sys.argv[0]).parent / CONFIG_NAME,
     ]
     # в домашнем каталоге
-    app_dir = get_app_dir()
-    search_order.append(app_dir / CONFIG_NAME)
+    home_config = get_app_dir() / CONFIG_NAME
+    search_order.append(home_config)
     # Возвращаем первый существующий файл
     for path in search_order:
         if path.is_file():
             CONFIG_PATH = path
             return
     # Если ничего не нашли, устанавливаем дефолтный путь для создания нового файла
-    CONFIG_PATH = app_dir / CONFIG_NAME
+    CONFIG_PATH = home_config
 
 
 def _set_config_value(key, value):
@@ -288,9 +305,9 @@ def _set_config_value(key, value):
         # Пытаемся привести строку из конфига к типу дефолта
         globals()[var_name] = target_type(value)
         if var_name == 'USER_PASS':
-            info(f'[C] {var_name}: [hidden]')
+            info(f'[Config] {var_name}: [hidden]')
         else:
-            info(f'[C] {var_name}: {value}')
+            info(f'[Config] {var_name}: {value}')
     except ValueError:
         error(f'Не удалось преобразовать {var_name} в {target_type.__name__}')
 
@@ -298,10 +315,11 @@ def _set_config_value(key, value):
 def read_config_file():
     find_config_file()
     if not CONFIG_PATH.exists():
-        info(f'Конфиг не найден. Создаем дефолтный; {CONFIG_PATH}')
+        info(f'[Config] Конфиг не найден. Создаем дефолтный; {CONFIG_PATH}')
         with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
-    config = ConfigParser()
+    # отключаем interpolation, чтобы в конфиге можно было использовать `%`
+    config = ConfigParser(interpolation=None)
     config.read((SYSTEM_CONFIG_PATH, CONFIG_PATH), encoding='utf-8')
 
     # Считываем из раздела [DEFAULT]
@@ -542,7 +560,7 @@ class DomainInfo:
     def _test_strategies(self, url, update=True):
         # Подбор стратегии через ciadpi
         # Возвращает (params, content) или 'DIRECT'
-        info(f'[*] Прямой доступ закрыт. Подбор стратегии для {self.domain}')
+        info(f'Прямой доступ закрыт. Подбор стратегии для {self.domain}')
         # Проверяем историю (предыдущие рабочие параметры)
         # Сначала пробуем последний известный рабочий вариант
         pre_strats = []
@@ -760,27 +778,27 @@ class DomainInfo:
         # Если related == True - проверяется ссылка из тестируемой страницы
         debug(f'{self.domain} - {target_url} - {related}')
         if self.user_config:
-            info(f'[!] Используем пользовательскую стратегию для {self.domain}: '
+            info(f'Используем пользовательскую стратегию для {self.domain}: '
                   f'{self.params or self.status}')
             return self.params or self.status
         res = self.check_expired()
         if not related and res is not None:
-            info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
+            info(f'Используем готовую стратегию для {self.domain}: {res}')
             return res
         with self.lock:
             # Double-check: вдруг кто-то уже проверил, пока мы ждали замок
             res = self.check_expired()
             if not related and res is not None:
-                info(f'[!] Используем готовую стратегию для {self.domain}: {res}')
+                info(f'Используем готовую стратегию для {self.domain}: {res}')
                 return res
 
             # Проверяем доступен ли ресурс
-            info(f'[*] Проверка {self.domain} напрямую...')
+            info(f'Проверка {self.domain} напрямую...')
             # Проверяем DNS
             ip = self._try_dns()
             if not ip:
                 # Блокировка DNS
-                info(f'[X] {self.domain} ошибка при получении DNS')
+                info(f'[!] {self.domain} ошибка при получении DNS')
                 self._update('FAILED')
                 return 'DIRECT'
 
@@ -789,20 +807,20 @@ class DomainInfo:
             port = int(parsed_url.port or (80 if parsed_url.scheme == 'http' else 443))
             if not self._try_tcp(ip, port):
                 # скорее всего блокировка по ip-адресу
-                info(f'[X] {self.domain} ошибка подключения к серверу')
+                info(f'[!] {self.domain} ошибка подключения к серверу')
                 self._update('FAILED')
                 return 'DIRECT'
             # Проверяем http
             for _ in range(NUMBER_OF_TESTS):
                 if self._try_http(target_url):
-                    info(f'[+] {self.domain} доступен НАПРЯМУЮ.')
+                    info(f'{self.domain} доступен НАПРЯМУЮ.')
                     self._update('DIRECT')
                     return 'DIRECT' # не проверять незаблокированные домены
 
             # проверка http не пройдена
             ret = self._test_strategies(target_url)
             if ret == 'DIRECT':
-                info(f'[X] {self.domain} стратегия не найдена')
+                info(f'[!] {self.domain} стратегия не найдена')
                 self._update('FAILED')
                 return 'DIRECT'
 
@@ -990,7 +1008,7 @@ class DomainRegistry:
             self._load(self.direct_file, 'DIRECT')
             self._load(self.failed_file, 'FAILED')
             self._load(USER_RULES_FILE, 'USER')
-            info(f'[+] Загружены правила для {len(self)} доменов')
+            info(f'Загружены правила для {len(self)} доменов')
             # загружаем историю параметров
             if self.history_file.exists():
                 with self.history_file.open(encoding='utf-8') as f:
@@ -1044,7 +1062,7 @@ class DomainRegistry:
 
     def update_user_rules(self):
         # Обновление пользовательских стратегий
-        info('[C] обновление пользовательских стратегий')
+        info('[Config] обновление пользовательских стратегий')
         with self._lock:
             # Удаляем все пользовательские стратегии
             self._user_data = {}
@@ -1069,7 +1087,7 @@ class DomainRegistry:
         debug(f'новый ISP: {isp_name}. Перезагрузка кэша')
         # Обновление настроек
         # считываем настройки из раздела ISP
-        config = ConfigParser()
+        config = ConfigParser(interpolation=None)
         config.read(CONFIG_PATH, encoding='utf-8')
         for key, value in config.items(isp_name):
             _set_config_value(key, value)
@@ -1117,7 +1135,7 @@ def load_strategies():
             s = s.split('#')[0]
             s = s.strip()
             if s and s not in strategies: strategies.append(s)
-    info(f'[+] Загружено {len(strategies)} стратегий')
+    info(f'Загружено {len(strategies)} стратегий')
 
 
 def watch_network():
@@ -1163,9 +1181,9 @@ def watch_network():
                 # Если провайдер сменился
                 if current_isp and current_isp != last_isp:
                     if last_isp:
-                        info(f'[!] Смена провайдера: {last_isp} -> {current_isp}')
+                        info(f'Смена провайдера: {last_isp} -> {current_isp}')
                     else:
-                        info(f'[!] Провайдер: {current_isp}')
+                        info(f'Провайдер: {current_isp}')
                     add_new_section(current_isp) # добавляем раздел в конфиг-файл
                     last_isp = current_isp
 
@@ -1370,7 +1388,7 @@ def handle_client(client_socket, address):
             params = dom.run_test(url) # получаем стратегию или DIRECT
 
         # Подключение к серверу
-        info(f'[>] Подключение: {host}:{port} '
+        info(f'Подключение: {host}:{port} '
              f'[{"HTTPS" if is_https else "HTTP"}] '
              f'[{params if params in ("DIRECT", "EXTERN") else "PROXY"}]')
 
@@ -1473,7 +1491,7 @@ def init_app():
         APP_DIR = Path(APP_DIR)
     else:
         APP_DIR = get_app_dir()
-    info(f'[C] служебный каталог: {APP_DIR}')
+    info(f'[Config] служебный каталог: {APP_DIR}')
     APP_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR = Path(CACHE_DIR) if CACHE_DIR else APP_DIR / 'cache'
     CACHE_DIR.mkdir(exist_ok=True)
@@ -1484,7 +1502,6 @@ def init_app():
     STRATEGIES_FILE = Path(STRATEGIES_FILE)
     # Обновляем логирование
     # Если в конфиг-файле указан другой уровень логирования или путь к логу
-    log_manager.upgrade()
     # Проверка необходимых файлов
     find_ciadpi_exe()
     if CIADPI_PATH:
@@ -1540,8 +1557,8 @@ def runtime_management():
 
 def start_proxy():
     init_app()
-    # Загрузка кэша
-    domain_registry.load_rules()
+    domain_registry.load_rules() # Загрузка кэша
+    log_manager.upgrade() # обновление настроек логирования
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
 
@@ -1570,7 +1587,7 @@ def start_proxy():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
-    info(f'[*] Прокси готов на порту {PORT}')
+    info(f'Прокси готов на порту {PORT}')
 
     try:
         while True:
@@ -1608,11 +1625,11 @@ def test_domain(url):
         for p in active_processes.values():
             p.terminate()
             p.wait()
-    info('\nНайдены стратегии:')
+    print('\nНайдены стратегии:')
     for domain in domain_registry:
         dom = domain_registry[domain]
-        info(f'{domain} {dom.params or dom.status}')
-    info('')
+        print(f'{domain} {dom.params or dom.status}')
+    print()
 
     if UPDATE_CACHE:
         # если в ком. строке указана опция -u
@@ -1639,7 +1656,7 @@ def test_domain(url):
         # сохраняем кэш
         saved_domain_registry.save_rules()
 
-    info(uptime('time'))
+    print(uptime('time'))
 
 if __name__ == '__main__':
     # Настраиваем логирование в самом начале,
