@@ -1141,10 +1141,10 @@ def load_strategies():
 def get_current_ip():
     # Список надежных и независимых друг от друга API
     services = [
-        'api.ipify.org',
         'ipv4.icanhazip.com',
         'ifconfig.me',
         'api.myip.com',  # Возвращает JSON
+        'api.ipify.org',
         '4.ident.me',
         '4.tnedi.me',
     ]
@@ -1552,11 +1552,15 @@ def runtime_management():
             conn.sendall(uptime().encode('utf-8'))
         elif data == 'pid':
             conn.sendall(f'PID: {os.getpid()}'.encode('utf-8'))
+        elif data == 'settings':
+            conn.sendall('\n'.join(f'{k} = {globals()[k]}'
+                                   for k in settings_list).encode('utf-8'))
         elif data == 'help':
             conn.sendall('''Доступные команды:
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
   summary - список добавленных за этот сеанс доменов
+  settings - список настроек
   uptime - время работы сервера
   pid - PID сервера'''.encode('utf-8'))
         else:
