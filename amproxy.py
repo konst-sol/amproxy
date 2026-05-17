@@ -1638,11 +1638,15 @@ def test_domain(url):
 
         if DYNAMIC_CONFIG:
             # определяем провайдера
-            current_ip = requests2.get('https://api.ipify.org', timeout=30).text.strip()
-            resp_url = f'http://ip-api.com/json/{current_ip}?fields=isp'
-            response = requests2.get(resp_url, timeout=30).json()
-            current_isp = response.get('isp')
-            debug(f'isp: {current_isp}')
+            try:
+                current_ip = requests2.get('https://api.ipify.org', timeout=30).text.strip()
+                resp_url = f'http://ip-api.com/json/{current_ip}?fields=isp'
+                response = requests2.get(resp_url, timeout=30).json()
+                current_isp = response.get('isp')
+                debug(f'isp: {current_isp}')
+            except Exception as err:
+                error(f'не удалось получить имя провайдера: {err}')
+                sys.exit(1)
             # переопределяем каталог кэша
             saved_domain_registry._isp_name = current_isp
             saved_domain_registry._set_cache_path()
