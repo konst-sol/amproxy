@@ -1490,16 +1490,17 @@ def init_app():
     load_strategies()
 
 
-def control_server():
-    # админка
-    control_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    control_sock.bind(('127.0.0.1', CONTROL_PORT))
-    control_sock.listen()
+def runtime_management():
+    # управление прокси-сервером во время выполнения
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('127.0.0.1', CONTROL_PORT))
+    sock.listen()
     info(f'[Control] Сервер управления запущен на 127.0.0.1:{CONTROL_PORT}')
     while True:
-        conn, addr = control_sock.accept()
+        conn, addr = sock.accept()
         data = conn.recv(1024).decode('utf-8').strip()
+        debug(f'получена команда управления: {data}')
         if data == 'ciadpi':
             conn.sendall(info_ciadpi_status().encode('utf-8'))
         elif data == 'stats':
@@ -1510,8 +1511,16 @@ def control_server():
             conn.sendall(uptime().encode('utf-8'))
         elif data == 'pid':
             conn.sendall(f'PID: {os.getpid()}'.encode('utf-8'))
+        elif data == 'help':
+            conn.sendall('''Доступные команды:
+  ciadpi - статус зарегистрированных процессов ciadpi
+  stats - статистика использования стратегий
+  summary - список добавленных за этот сеанс доменов
+  uptime - время работы сервера
+  pid - PID сервера'''.encode('utf-8'))
         else:
             conn.sendall(f'ERROR: Unknown command: {data}'.encode('utf-8'))
+
         conn.close()
 
 
@@ -1535,7 +1544,7 @@ def start_proxy():
     threading.Thread(target=watch_file, daemon=True).start()
     # Запуск админки
     if CONTROL_PORT:
-        threading.Thread(target=control_server, daemon=True).start()
+        threading.Thread(target=runtime_management, daemon=True).start()
 
     # перехват SIGTERM
     def handle_sigterm(signum, frame):

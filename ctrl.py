@@ -43,15 +43,13 @@ def main():
     parser = argparse.ArgumentParser(
         description='Утилита для управления прокси-сервером.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Примеры использования:\n'
-               '  python ctrl.py uptime\n'
-               '  python ctrl.py stats --host 192.168.1.50 --port 9999'
+        epilog='Для получения списка команд отправьте help:\n  python ctrl.py help\n'
     )
     # Обязательный аргумент — сама команда
     parser.add_argument(
         'command', 
         #choices=['reload', 'status'], 
-        help='Команда для отправки на прокси-сервер'
+        help='Команда прокси-серверу'
     )
     # Необязательные аргументы для смены хоста и порта
     parser.add_argument(
