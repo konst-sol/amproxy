@@ -1127,9 +1127,22 @@ def watch_network():
     while True:
         # Определяем IP (раз в 60-90 сек)
         current_ip = None
+        url = 'https://api.ipify.org'
+        proxies = {}
+        if 0:
+            # обход блокировки
+            dom = domain_registry.get_domain_info('api.ipify.org')
+            params = dom.run_test(url) # получаем стратегию или DIRECT
+            if params != 'DIRECT':
+                target_port = get_params_to_port(params)
+                # запуск ciadpi
+                if not ensure_ciadpi(target_port, params):
+                    error('ensure_ciadpi вернул False')
+                    continue
+                proxies = {'http': f'socks5://127.0.0.1:{target_port}',
+                           'https': f'socks5://127.0.0.1:{target_port}'}
         try:
-            current_ip = requests2.get('https://api.ipify.org', timeout=30
-                                       ).text.strip()
+            current_ip = requests2.get(url, timeout=30, proxies=proxies).text.strip()
         except Exception as err:
             debug(f'ip: {err}')
             # не делаем continue чтобы time.sleep()
@@ -1484,6 +1497,7 @@ def init_app():
         sys.exit(1)
 
     # Глобальный реестр доменов
+    # (кэш не загружаем)
     global domain_registry
     domain_registry = DomainRegistry() # {domain: DomainInfo}
 
