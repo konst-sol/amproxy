@@ -58,12 +58,12 @@
 вывод лога в файл - укажите пустую строку: `log_file=` в конфиг-файле.
 * `LOG_INFO_FORMAT`, `LOG_DEBUG_FORMAT`, `LOG_ERROR_FORMAT` - форматы
 вывода для разных уровней. Популярные плейсхолдеры для строки формата:
-  * %(asctime)s — точное время
-  * %(levelname)s — уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-  * %(message)s — само сообщение
-  * %(filename)s — имя файла, из которого вызван лог
-  * %(lineno)d — номер строки кода, где произошел вызов
-  * %(name)s — имя логгера
+  * `%(asctime)s` — точное время
+  * `%(levelname)s` — уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  * `%(message)s` — само сообщение
+  * `%(filename)s` — имя файла, из которого вызван лог
+  * `%(lineno)d` — номер строки кода, где произошел вызов
+  * `%(name)s` — имя логгера\
 Пример, добавить вывод времени:
 ```
 LOG_INFO_FORMAT = %(asctime)s %(message)s
