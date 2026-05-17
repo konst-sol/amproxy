@@ -1138,32 +1138,45 @@ def load_strategies():
     info(f'Загружено {len(strategies)} стратегий')
 
 
+def get_current_ip():
+    # Список надежных и независимых друг от друга API
+    services = [
+        'api.ipify.org',
+        'ipv4.icanhazip.com',
+        'ifconfig.me',
+        'api.myip.com',  # Возвращает JSON
+        '4.ident.me',
+        '4.tnedi.me',
+    ]
+    for url in services:
+        try:
+            # Используем небольшой таймаут
+            response = requests2.get('https://'+url, timeout=10)
+            if response.status_code == 200:
+                ip = response.text.strip()
+                if ip.startswith('{'): # для myip.com (он возвращает json)
+                    ip = response.json().get('ip')
+                socket.inet_pton(socket.AF_INET, ip) # проверка корректности ip
+                return ip
+        except Exception as err:
+            debug(err)
+            pass # Если упал в таймаут или ошибку — переходим к следующему в списке
+    return None # Если все сервисы легли
+
 def watch_network():
     debug('запуск мониторинга сети')
+    timeout = 60 # сек. Интервал проверки
     last_ip = None
     last_isp = None
     while True:
-        # Определяем IP (раз в 60-90 сек)
-        current_ip = None
-        url = 'https://api.ipify.org'
-        proxies = {}
-        if 0:
-            # обход блокировки
-            dom = domain_registry.get_domain_info('api.ipify.org')
-            params = dom.run_test(url) # получаем стратегию или DIRECT
-            if params != 'DIRECT':
-                target_port = get_params_to_port(params)
-                # запуск ciadpi
-                if not ensure_ciadpi(target_port, params):
-                    error('ensure_ciadpi вернул False')
-                    continue
-                proxies = {'http': f'socks5://127.0.0.1:{target_port}',
-                           'https': f'socks5://127.0.0.1:{target_port}'}
-        try:
-            current_ip = requests2.get(url, timeout=30, proxies=proxies).text.strip()
-        except Exception as err:
-            debug(f'ip: {err}')
-            # не делаем continue чтобы time.sleep()
+        # Определяем IP
+        ip = get_current_ip()
+        if ip:
+            current_ip = ip
+        else:
+            debug('не удалось определить ip')
+            time.sleep(timeout)
+            continue
         # Проверяем смену IP
         if current_ip and current_ip != last_ip:
             debug(f'Обнаружен новый IP: {current_ip}')
@@ -1186,12 +1199,9 @@ def watch_network():
                         info(f'Провайдер: {current_isp}')
                     add_new_section(current_isp) # добавляем раздел в конфиг-файл
                     last_isp = current_isp
-
                     domain_registry.set_isp(current_isp) # обновляем настройки
-
                 last_ip = current_ip
-
-        time.sleep(60) # Интервал проверки
+        time.sleep(timeout)
 
 
 # EXTERN proxy
