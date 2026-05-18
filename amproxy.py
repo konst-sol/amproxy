@@ -106,9 +106,20 @@ CONFIG_SECTION = None
 TESTED_DOMAIN = None
 # Обновление кэша в режиме поиска стратегий
 UPDATE_CACHE = False
-
 # </НАСТРОЙКИ>
 
+# <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
+strategies = [] # список тестируемых стратегий
+# Служебные данные процессов
+params_to_port = {} # {params: port}
+active_processes = {} # {port: subprocess.Popen}
+# Логирование
+log_manager = None # объект класса LogManager
+# Глобальный реестр доменов
+domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
+# Функции вывода в лог. Переопределяются в LogManager
+error = info = debug = lambda x: None
+# </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 
 # <LOGGING>
 # Настройка вывода
@@ -134,8 +145,6 @@ class LevelFormatter(logging.Formatter):
     def format(self, record):
         formatter = self._formatters.get(record.levelno, self._default_formatter)
         return formatter.format(record)
-
-
 
 class LogManager:
     def __init__(self):
@@ -354,18 +363,6 @@ def add_new_section(isp_name):
         f.write(f'# Секция добавлена автоматически\n[{isp_name}]\n\n')
 
 # </CONFIG_FILE>
-
-# <ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
-strategies = [] # список тестируемых стратегий
-# Служебные данные процессов
-params_to_port = {} # {params: port}
-active_processes = {} # {port: subprocess.Popen}
-# Логирование
-log_manager = None # объект класса LogManager
-# Глобальный реестр доменов
-domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
-# </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
-
 
 # <DEBUG>
 # Вывод статуса ciadpi, статистики использования стратегий и добавления доменов в кэш
@@ -1613,7 +1610,7 @@ def runtime_management():
             if dom:
                 send('\n'.join(f'{k}: {v}' for k, v in dom.info().items()))
             else:
-                send(f'{domain} не зарегистрирован')
+                send(f'Домен {domain} не зарегистрирован')
         elif data.startswith('del '):
             domain = data[4:].strip()
             if domain_registry.del_domain_info(domain):
@@ -1635,7 +1632,7 @@ def runtime_management():
   uptime - время работы сервера
   pid - PID сервера''')
         else:
-            send(f'ERROR: Unknown command: {data}')
+            send(f'ERROR: Unknown command: "{data}"')
 
         conn.close()
 

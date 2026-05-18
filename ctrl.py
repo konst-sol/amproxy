@@ -62,7 +62,6 @@ def main():
     parser.add_argument(
         'command',
         nargs='+',
-        #choices=['reload', 'status'], 
         help='Команда прокси-серверу'
     )
     # Необязательные аргументы для смены хоста и порта
@@ -74,7 +73,6 @@ def main():
     parser.add_argument(
         '-p', '--port',
         type=int,
-        default=0,
         help='Порт управляющего сервера'
     )
     parser.add_argument(
@@ -103,8 +101,8 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         else:
-            amproxy.info=lambda x: None
             amproxy.read_config_file()
+            print(f'Определение порта из {amproxy.CONFIG_PATH}')
             port = amproxy.CONTROL_PORT
             if not port:
                 print('ERROR: Укажите порт управляющего сервера в конфиг-файле '
