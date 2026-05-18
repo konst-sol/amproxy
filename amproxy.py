@@ -12,7 +12,7 @@
 
 import sys, os, time
 import shutil
-from datetime import timedelta
+from datetime import timedelta, datetime
 from pathlib import Path
 from fnmatch import fnmatch
 # для сети
@@ -148,6 +148,7 @@ class LogManager:
         self.console_handler.setFormatter(LevelFormatter())
         self.logger.addHandler(self.console_handler)
         # Переменные для будущего апгрейда
+        self.file_handler = None
         self.log_queue = None
         self.queue_handler = None
         self.listener = None
@@ -169,7 +170,6 @@ class LogManager:
         # Удаляем прямой консольный хэндлер из логгера, чтобы избежать дублирования
         if self.console_handler in self.logger.handlers:
             self.logger.removeHandler(self.console_handler)
-        self.console_handler.setFormatter(LevelFormatter()) # если в конфиге поменялся формат
 
         # Готовим список конечных получателей для Listener'а
         # Возвращаем наш консольный хэндлер (теперь им будет управлять Listener)
@@ -180,11 +180,10 @@ class LogManager:
             log_path = LOG_DIR / LOG_FILE
             # Вывод в файл
             # размер лог-файла 100 КБ, храним 4 старые копии
-            file_handler = logging.handlers.RotatingFileHandler(
+            self.file_handler = logging.handlers.RotatingFileHandler(
                 log_path, maxBytes=100*1024, backupCount=4, encoding='utf-8'
             )
-            file_handler.setFormatter(LevelFormatter())
-            dest_handlers.append(file_handler)
+            dest_handlers.append(self.file_handler)
         # Настраиваем инфраструктуру очереди
         self.log_queue = queue.Queue()
         # Создаем QueueHandler и подключаем его к логгеру
@@ -192,11 +191,22 @@ class LogManager:
         self.logger.addHandler(self.queue_handler)
         # Создаем и запускаем QueueListener, передав ему все конечные хэндлеры
         self.listener = logging.handlers.QueueListener(self.log_queue, *dest_handlers)
+
+        self.set_formatter()
+        self.update_log_level()
+
+        self.listener.start()
+
+    def update_log_level(self):
         # Обновление уровня
         level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
         self.logger.setLevel(level)
 
-        self.listener.start()
+    def set_formatter(self):
+        if self.file_handler:
+            self.file_handler.setFormatter(LevelFormatter())
+        if self.console_handler:
+            self.console_handler.setFormatter(LevelFormatter())
 
     def stop(self):
         # Безопасно останавливает listener, избегая гонки потоков при Ctrl+C.
@@ -881,7 +891,6 @@ class DomainInfo:
             return params
 
     def info(self):
-        from datetime import datetime
         info = {
             'domain': self.domain,
             'status': self.status,
@@ -1598,8 +1607,8 @@ def runtime_management():
 
 def start_proxy():
     init_app()
-    domain_registry.load_rules() # Загрузка кэша
     log_manager.upgrade() # обновление настроек логирования
+    domain_registry.load_rules() # Загрузка кэша
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
 
@@ -1654,6 +1663,8 @@ def start_proxy():
 # кэш не загружается
 def test_domain(url):
     init_app()
+    log_manager.set_formatter()
+    log_manager.update_log_level()
 
     if not url.startswith(('http://', 'https://')):
         url = 'https://'+url
@@ -1680,7 +1691,7 @@ def test_domain(url):
         if DYNAMIC_CONFIG:
             # определяем провайдера
             try:
-                current_ip = requests2.get('https://api.ipify.org', timeout=30).text.strip()
+                current_ip = get_current_ip()
                 resp_url = f'http://ip-api.com/json/{current_ip}?fields=isp'
                 response = requests2.get(resp_url, timeout=30).json()
                 current_isp = response.get('isp')
