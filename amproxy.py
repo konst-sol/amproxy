@@ -880,6 +880,23 @@ class DomainInfo:
 
             return params
 
+    def info(self):
+        from datetime import datetime
+        info = {
+            'domain': self.domain,
+            'status': self.status,
+        }
+        if self.extern_proxy:
+            info['extern_proxy'] = self.extern_proxy
+        info['test_time'] = datetime.fromtimestamp(self.test_time)
+        if self.params:
+            info['params'] = self.params
+        if self.history_params:
+            info['history_params'] = '|'.join(self.history_params)
+        info['user_config'] = self.user_config
+        #self.urls = set()
+        return info
+
 # </DOMAININFO>
 
 
@@ -1538,33 +1555,43 @@ def runtime_management():
     sock.bind(('127.0.0.1', CONTROL_PORT))
     sock.listen()
     info(f'[Control] Сервер управления запущен на 127.0.0.1:{CONTROL_PORT}')
+    conn = None
+    def send(txt):
+        conn.sendall(txt.encode('utf-8'))
     while True:
         conn, addr = sock.accept()
         data = conn.recv(1024).decode('utf-8').strip()
         debug(f'получена команда управления: {data}')
         if data == 'ciadpi':
-            conn.sendall(info_ciadpi_status().encode('utf-8'))
+            send(info_ciadpi_status())
         elif data == 'stats':
-            conn.sendall(info_params_stat().encode('utf-8'))
+            send(info_params_stat())
         elif data == 'summary':
-            conn.sendall(info_summary().encode('utf-8'))
+            send(info_summary())
         elif data == 'uptime':
-            conn.sendall(uptime().encode('utf-8'))
+            send(uptime())
         elif data == 'pid':
-            conn.sendall(f'PID: {os.getpid()}'.encode('utf-8'))
+            send(f'PID: {os.getpid()}')
         elif data == 'settings':
-            conn.sendall('\n'.join(f'{k} = {globals()[k]}'
-                                   for k in settings_list).encode('utf-8'))
+            send('\n'.join(f'{k} = {globals()[k]}' for k in settings_list))
+        elif data.startswith('info'):
+            domain = data[5:].strip()
+            dom = domain_registry.get(domain)
+            if dom:
+                send('\n'.join(f'{k}: {v}' for k, v in dom.info().items()))
+            else:
+                send(f'{domain} не зарегистрирован')
         elif data == 'help':
-            conn.sendall('''Доступные команды:
+            send('''Доступные команды:
+  info <domain> - информация о домене
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
   summary - список добавленных за этот сеанс доменов
   settings - список настроек
   uptime - время работы сервера
-  pid - PID сервера'''.encode('utf-8'))
+  pid - PID сервера''')
         else:
-            conn.sendall(f'ERROR: Unknown command: {data}'.encode('utf-8'))
+            send(f'ERROR: Unknown command: {data}')
 
         conn.close()
 
