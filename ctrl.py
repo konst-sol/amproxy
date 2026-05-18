@@ -60,7 +60,8 @@ def main():
     )
     # Обязательный аргумент — сама команда
     parser.add_argument(
-        'command', 
+        'command',
+        nargs='+',
         #choices=['reload', 'status'], 
         help='Команда прокси-серверу'
     )
@@ -85,11 +86,11 @@ def main():
         port = args.port
     elif args.config:
         if not os.path.isfile(args.config):
-            print(f'конфиг-файл {args.config} не найден')
+            print(f'ERROR: конфиг-файл {args.config} не найден')
             sys.exit(1)
         port = get_port_from_config(args.config)
         if not port:
-            print(f'опция control_port в конфиг-файле {args.config} не найдена')
+            print(f'ERROR: опция control_port в конфиг-файле {args.config} не найдена')
             sys.exit(1)
         port = int(port)
     else:
@@ -112,8 +113,9 @@ def main():
                 sys.exit(1)
 
     # Отправляем команду
-    print(f'Отправка команды {args.command} на {args.host}:{port}...')
-    send_command(args.command, args.host, port)
+    command = ' '.join(args.command)
+    print(f'Отправка команды {command} на {args.host}:{port}...')
+    send_command(command, args.host, port)
 
 if __name__ == '__main__':
     main()

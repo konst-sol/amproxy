@@ -408,7 +408,7 @@ def info_params_stat():
     out.append('-' * 50)
     for d, n in sorted(stat.items(), key=lambda item: item[1]):
         out.append(f'{n:<3} | {d}')
-    out.append('='*50+'\n')
+    out.append('='*50)
     return '\n'.join(out)
 
 # summary
@@ -954,7 +954,6 @@ class DomainRegistry:
                 return self._user_data[pattern]
             if fnmatch(key, pattern):
                 return self._user_data[pattern]
-
         # Точное совпадение в авто-доменах
         if key in self._auto_data:
             return self._auto_data[key]
@@ -1105,6 +1104,15 @@ class DomainRegistry:
             if domain not in self:
                 self[domain] = DomainInfo(domain)
             return self[domain]
+
+    def del_domain_info(self, domain):
+        # Безопасно удаляет объект DomainInfo
+        with self._lock:
+            # Проверяем и удаляем только из автоматических данных
+            if domain in self._auto_data:
+                del self._auto_data[domain]
+                return True
+            return False
 
     def set_isp(self, isp_name):
         # Изменение кэша при смене провайдера
@@ -1521,12 +1529,14 @@ def find_ciadpi_exe():
 def init_app(upgrade_logging=True):
     global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
     read_config_file()
-    # обновление настроек логирования после чтения конфига
+    # Обновляем логирование
+    # Если в конфиг-файле указан другой уровень логирования или путь к логу
     if upgrade_logging:
-        # настраиваем на работу через queue для многопоточности
+        # настраиваем на работу через queue для многопоточности (режим сервера)
         log_manager.upgrade()
     else:
         # настраиваем только уровень и форматирование для использования print
+        # (режим поиска стратегии)
         log_manager.set_formatter()
         log_manager.update_log_level()
     # определяем служебный каталог
@@ -1544,8 +1554,6 @@ def init_app(upgrade_logging=True):
     USER_RULES_FILE = (Path(USER_RULES_FILE) if USER_RULES_FILE
                        else APP_DIR / 'user-rules.txt')
     STRATEGIES_FILE = Path(STRATEGIES_FILE)
-    # Обновляем логирование
-    # Если в конфиг-файле указан другой уровень логирования или путь к логу
     # Проверка необходимых файлов
     find_ciadpi_exe()
     if CIADPI_PATH:
@@ -1591,20 +1599,27 @@ def runtime_management():
             send(f'PID: {os.getpid()}')
         elif data == 'settings':
             send('\n'.join(f'{k} = {globals()[k]}' for k in settings_list))
-        elif data.startswith('info'):
+        elif data.startswith('info '):
             domain = data[5:].strip()
             dom = domain_registry.get(domain)
             if dom:
                 send('\n'.join(f'{k}: {v}' for k, v in dom.info().items()))
             else:
                 send(f'{domain} не зарегистрирован')
+        elif data.startswith('del '):
+            domain = data[4:].strip()
+            if domain_registry.del_domain_info(domain):
+                send(f'Домен {domain} удален из кэша')
+            else:
+                send(f'Домен {domain} не зарегистрирован')
         elif data == 'help':
             send('''Доступные команды:
   info <domain> - информация о домене
+  del <domain> - удаление домена из кэша
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
   summary - список добавленных за этот сеанс доменов
-  settings - список настроек
+  settings - список настроек сервера
   uptime - время работы сервера
   pid - PID сервера''')
         else:
