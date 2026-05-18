@@ -1518,9 +1518,17 @@ def find_ciadpi_exe():
         CIADPI_PATH = Path(system_binary_str)
     # Если нигде не нашли, CIADPI_PATH остается пустой строкой
 
-def init_app():
+def init_app(upgrade_logging=True):
     global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
     read_config_file()
+    # обновление настроек логирования после чтения конфига
+    if upgrade_logging:
+        # настраиваем на работу через queue для многопоточности
+        log_manager.upgrade()
+    else:
+        # настраиваем только уровень и форматирование для использования print
+        log_manager.set_formatter()
+        log_manager.update_log_level()
     # определяем служебный каталог
     if APP_DIR:
         # определен в конфиге или ком. строке
@@ -1607,7 +1615,6 @@ def runtime_management():
 
 def start_proxy():
     init_app()
-    log_manager.upgrade() # обновление настроек логирования
     domain_registry.load_rules() # Загрузка кэша
 
     debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
@@ -1662,9 +1669,7 @@ def start_proxy():
 # поиск стратегии для одного домена
 # кэш не загружается
 def test_domain(url):
-    init_app()
-    log_manager.set_formatter()
-    log_manager.update_log_level()
+    init_app(upgrade_logging=False)
 
     if not url.startswith(('http://', 'https://')):
         url = 'https://'+url
