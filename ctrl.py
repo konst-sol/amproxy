@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- mode: python; coding: utf-8; -*-
 
+import sys, os
 import socket
 import argparse
-import sys
+from configparser import ConfigParser
 
 def send_command(command, host, port):
     '''Отправляет текстовую команду на управляющий порт прокси-сервера.'''
@@ -38,6 +39,18 @@ def send_command(command, host, port):
         print(f'ERROR: Произошла непредвиденная ошибка: {e}', file=sys.stderr)
         sys.exit(1)
 
+def get_port_from_config(config_path):
+    config = ConfigParser(interpolation=None)
+    config.read((config_path), encoding='utf-8')
+    for section in config.sections():
+        if 'control_port' in config[section]:
+            port = config[section]['control_port']
+            return port
+    if 'control_port' in config.defaults():
+        port = config.defaults()['control_port']
+        return port
+    return None
+
 def main():
     # Настраиваем парсер аргументов командной строки
     parser = argparse.ArgumentParser(
@@ -63,15 +76,29 @@ def main():
         default=0,
         help='Порт управляющего сервера'
     )
+    parser.add_argument(
+        '-c', '--config',
+        help='Путь к конфиг-файлу прокси'
+    )
     args = parser.parse_args()
     if args.port:
         port = args.port
+    elif args.config:
+        if not os.path.isfile(args.config):
+            print(f'конфиг-файл {args.config} не найден')
+            sys.exit(1)
+        port = get_port_from_config(args.config)
+        if not port:
+            print(f'опция control_port в конфиг-файле {args.config} не найдена')
+            sys.exit(1)
+        port = int(port)
     else:
         try:
             import amproxy
         except ImportError:
             print('ERROR: Не удалось импортировать amproxy. '
-                  'Укажите порт управляющего сервера в коммандной строке',
+                  'Укажите в командной строке порт управляющего сервера (-p) '
+                  'или путь к конфиг-файлу (-c)',
                   file=sys.stderr)
             sys.exit(1)
         else:
