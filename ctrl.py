@@ -6,6 +6,8 @@ import socket
 import argparse
 from configparser import ConfigParser
 
+sys.dont_write_bytecode = True # чтобы не создавать __pycache__/ в текущем каталоге
+
 def send_command(command, host, port):
     '''Отправляет текстовую команду на управляющий порт прокси-сервера.'''
     try:
