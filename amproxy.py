@@ -1114,6 +1114,14 @@ class DomainRegistry:
                 return True
             return False
 
+    def search(self, pat):
+        #if not pat: return []
+        result = []
+        for domain in self:
+            if pat in domain:
+                result.append(domain)
+        return result
+
     def set_isp(self, isp_name):
         # Изменение кэша при смене провайдера
         if isp_name == self._isp_name:
@@ -1581,8 +1589,8 @@ def runtime_management():
     sock.listen()
     info(f'[Control] Сервер управления запущен на 127.0.0.1:{CONTROL_PORT}')
     conn = None
-    def send(txt):
-        conn.sendall(txt.encode('utf-8'))
+    def send(data):
+        conn.sendall(data.encode('utf-8'))
     while True:
         conn, addr = sock.accept()
         data = conn.recv(1024).decode('utf-8').strip()
@@ -1612,8 +1620,12 @@ def runtime_management():
                 send(f'Домен {domain} удален из кэша')
             else:
                 send(f'Домен {domain} не зарегистрирован')
+        elif data.startswith('search '):
+            pat = data[7:].strip()
+            send('\n'.join(domain_registry.search(pat)))
         elif data == 'help':
             send('''Доступные команды:
+  search <str> - вывод всех доменов в имени которых есть подстрока <str>
   info <domain> - информация о домене
   del <domain> - удаление домена из кэша
   ciadpi - статус зарегистрированных процессов ciadpi
