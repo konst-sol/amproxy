@@ -11,8 +11,6 @@ def send_command(command, host, port):
     try:
         # Создаем TCP-сокет
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            # Устанавливаем таймаут, чтобы утилита не зависла, если сервер мертв
-            sock.settimeout(3.0)
             # Подключаемся к прокси
             sock.connect((host, port))
             # Отправляем команду (добавляем перевод строки для надежности)

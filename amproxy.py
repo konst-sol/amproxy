@@ -779,22 +779,26 @@ class DomainInfo:
         return result
 
     # *Основная функция*
-    def run_test(self, target_url, related=False):
+    def run_test(self, target_url, related=False, force=False):
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
         # Если related == True - проверяется ссылка из тестируемой страницы
-        debug(f'{self.domain} - {target_url} - {related}')
+        # Если force == True - не проверять устаревание
+        debug(f'{self.domain} - {target_url} - {related} - {force}')
         if self.user_config:
             info(f'Используем пользовательскую стратегию для {self.domain}: '
                   f'{self.params or self.status}')
             return self.params or self.status
-        res = self.check_expired()
+        res = None
+        if not force:
+            res = self.check_expired()
         if not related and res is not None:
             info(f'Используем готовую стратегию для {self.domain}: {res}')
             return res
         with self.lock:
             # Double-check: вдруг кто-то уже проверил, пока мы ждали замок
-            res = self.check_expired()
+            if not force:
+                res = self.check_expired()
             if not related and res is not None:
                 info(f'Используем готовую стратегию для {self.domain}: {res}')
                 return res
@@ -894,7 +898,8 @@ class DomainInfo:
         }
         if self.extern_proxy:
             info['extern_proxy'] = self.extern_proxy
-        info['test_time'] = datetime.fromtimestamp(self.test_time)
+        if not self.user_config:
+            info['test_time'] = datetime.fromtimestamp(self.test_time)
         if self.params:
             info['params'] = self.params
         if self.history_params:
@@ -1620,11 +1625,21 @@ def runtime_management():
         elif data.startswith('search '):
             pat = data[7:].strip()
             send('\n'.join(domain_registry.search(pat)))
+        elif data.startswith('update '):
+            url = data[7:]
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://'+url
+            parsed_url = urlparse(url)
+            domain = parsed_url.hostname
+            dom = domain_registry.get_domain_info(domain)
+            params = dom.run_test(url, force=True)
+            send(f'Найдена стратегия для {domain}: {params}')
         elif data == 'help':
             send('''Доступные команды:
   search <str> - вывод всех доменов в имени которых есть подстрока <str>
   info <domain> - информация о домене
   del <domain> - удаление домена из кэша
+  update <domain|url> - принудительно обновить стратегию
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
   summary - список добавленных за этот сеанс доменов
