@@ -85,7 +85,7 @@ LOG_FILE = APP_NAME+'.log' # если пустая строка - не логи�
 # форматы вывода для разных уровней
 LOG_INFO_FORMAT = '%(message)s'
 LOG_DEBUG_FORMAT = '[D] %(filename)s:%(lineno)d: %(funcName)s: %(message)s'
-LOG_ERROR_FORMAT = '[E] %(filename)s:%(lineno)d: %(funcName)s: %(message)s'
+LOG_ERROR_FORMAT = 'ERROR: %(message)s'
 
 # Определяем список имен параметров для конфиг-файла
 # Сразу после настроек и до всего остального
@@ -321,7 +321,7 @@ def _set_config_value(key, value):
     var_name = key.upper()
     # Проверяем существует ли уже такая переменная в списке настроек
     if var_name not in settings_list:
-        error(f'Неизвестная опция в конфиг-файле: {key}')
+        error(f'[Config] Неизвестная опция в конфиг-файле: {key}')
         return
     current_value = globals()[var_name]
     # Сохраняем тип дефолтной переменной (int, float, str, Path)
@@ -334,18 +334,19 @@ def _set_config_value(key, value):
         else:
             info(f'[Config] {var_name}: {value}')
     except ValueError:
-        error(f'Не удалось преобразовать {var_name} в {target_type.__name__}')
+        error(f'[Config] Не удалось преобразовать {var_name} в {target_type.__name__}')
 
 # Считываем конфиг-файл
 def read_config_file():
     find_config_file()
     if not CONFIG_PATH.exists():
-        info(f'[Config] Конфиг не найден. Создаем дефолтный: {CONFIG_PATH}')
+        info(f'[Config] Конфиг-файл не найден. Создаем дефолтный: {CONFIG_PATH}')
         with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
     # отключаем interpolation, чтобы в конфиге можно было использовать `%`
     config = ConfigParser(interpolation=None)
-    config.read((SYSTEM_CONFIG_PATH, CONFIG_PATH), encoding='utf-8')
+    res = config.read((SYSTEM_CONFIG_PATH, CONFIG_PATH), encoding='utf-8')
+    info(f'Прочитаны конфиг-файлы: {", ".join(res)}')
 
     # Считываем из раздела [DEFAULT]
     # (По умолчанию имена разделов чувствительны к регистру)
@@ -357,7 +358,7 @@ def read_config_file():
             for key, value in config.items(CONFIG_SECTION):
                 _set_config_value(key, value)
         else:
-            error(f'Раздел {CONFIG_SECTION} не найден')
+            error(f'[Config] Раздел {CONFIG_SECTION} не найден')
 
 def add_new_section(isp_name):
     # Дописывает новую секцию в конец конфиг-файла (для watch_network)
@@ -1587,7 +1588,7 @@ def find_ciadpi_exe():
         CIADPI_PATH = Path(system_binary_str)
     # Если нигде не нашли, CIADPI_PATH остается пустой строкой
 
-def init_app(upgrade_logging=True):
+def init_app(proxy_mode=True):
     global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
     # определяем служебный каталог
     if APP_DIR:
@@ -1595,14 +1596,14 @@ def init_app(upgrade_logging=True):
         APP_DIR = Path(APP_DIR)
     else:
         APP_DIR = get_app_dir()
-    info(f'[Config] Служебный каталог: {APP_DIR}')
+    info(f'Служебный каталог: {APP_DIR}')
     APP_DIR.mkdir(parents=True, exist_ok=True)
     read_config_file()
     # Обновляем логирование
     # Если в конфиг-файле указан другой уровень логирования или путь к логу
     LOG_DIR = Path(LOG_DIR) if LOG_DIR else APP_DIR / 'log'
     LOG_DIR.mkdir(exist_ok=True)
-    if upgrade_logging:
+    if proxy_mode:
         # настраиваем на работу через queue для многопоточности (режим сервера)
         log_manager.upgrade()
     else:
@@ -1620,17 +1621,18 @@ def init_app(upgrade_logging=True):
     if CIADPI_PATH:
         debug(f'путь к ciadpi: {CIADPI_PATH}')
     else:
-        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}. Выход')
+        error(f'Не найден бинарник ByDPI: {CIADPI_EXE}')
         sys.exit(1)
     if not STRATEGIES_FILE.exists():
-        error(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
+        error(f'Не найден файл стратегий: {STRATEGIES_FILE}')
         sys.exit(1)
     # Глобальный реестр доменов
     # (кэш не загружаем)
     global domain_registry
     domain_registry = DomainRegistry() # {domain: DomainInfo}
-
     load_strategies()
+    if proxy_mode:
+        domain_registry.load_rules() # Загрузка кэша
 
 
 def runtime_management():
@@ -1639,7 +1641,7 @@ def runtime_management():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('127.0.0.1', CONTROL_PORT))
     sock.listen()
-    info(f'[Control] Сервер управления запущен на 127.0.0.1:{CONTROL_PORT}')
+    info(f'Сервер управления запущен на 127.0.0.1:{CONTROL_PORT}')
     conn = None
     def send(data):
         conn.sendall(data.encode('utf-8'))
@@ -1704,17 +1706,13 @@ def runtime_management():
 
 def start_proxy():
     init_app()
-    domain_registry.load_rules() # Загрузка кэша
-
-    debug(f'{time.strftime("%d.%m.%Y %H:%M")} (PID: {os.getpid()})')
-
     # Аутентификация
     if USER_PASS:
         global AUTH_ENCODED
         # Закодированный логин:пароль
         AUTH_ENCODED = base64.b64encode(USER_PASS.encode()).decode()
         debug('используется аутентификация')
-    # Запуск мониторинга сети. Смена настроек при изменении провайдера
+    # Запуск мониторинга сети. Смена настроек и кэша при изменении провайдера
     if DYNAMIC_CONFIG:
         threading.Thread(target=watch_network, daemon=True).start()
     # Запуск мониторинга пользовательского файла стратегий
@@ -1733,7 +1731,9 @@ def start_proxy():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
-    info(f'Прокси готов на порту {PORT}')
+
+    info(f'** {time.strftime("%d.%m.%Y %H:%M%S")} Прокси готов на порту {PORT} '
+         f'(PID: {os.getpid()}) **')
 
     try:
         while True:
@@ -1757,7 +1757,7 @@ def start_proxy():
 # поиск стратегии для одного домена
 # кэш не загружается
 def test_domain(url):
-    init_app(upgrade_logging=False)
+    init_app(proxy_mode=False)
 
     if not url.startswith(('http://', 'https://')):
         url = 'https://'+url
