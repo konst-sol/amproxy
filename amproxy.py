@@ -336,8 +336,7 @@ def _set_config_value(key, value):
 def read_config_file():
     find_config_file()
     if not CONFIG_PATH.exists():
-        info(f'[Config] Конфиг не найден. Создаем дефолтный; {CONFIG_PATH}')
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        info(f'[Config] Конфиг не найден. Создаем дефолтный: {CONFIG_PATH}')
         with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
     # отключаем interpolation, чтобы в конфиге можно было использовать `%`
@@ -1119,20 +1118,21 @@ class DomainRegistry:
         prepared_data = {}
         for domain, dom in self._auto_data.items():
             # Формируем словарь нужных атрибутов
-            prepared_data[domain] = {
-                'status': dom.status,
-                'params': dom.params,
-                'test_time': dom.test_time,
-                'history_params': dom.history_params,
-                'urls': list(dom.urls),  # Конвертируем set в list для JSON
-            }
+            dom_dict = {'status': dom.status}
+            if dom.params:
+                dom_dict['params'] = dom.params
+            dom_dict['test_time'] = dom.test_time
+            if dom.history_params:
+                dom_dict['history_params'] = dom.history_params
+            if dom.urls:
+                dom_dict['urls'] = list(dom.urls) # Конвертируем set в list для JSON
+            prepared_data[domain] = dom_dict
         # Записываем данные в файл с отступами для читаемости
         with file_path.open('w', encoding='utf-8') as f:
             json.dump(prepared_data, f, ensure_ascii=False, indent=4)
 
     def load_from_json(self):
-        file_path = self.json_file
-        with file_path.open(encoding='utf-8') as f:
+        with self.json_file.open(encoding='utf-8') as f:
             data = json.load(f)
         for domain, dom_dict in data.items():
             dom = DomainInfo(domain)
@@ -1195,7 +1195,7 @@ class DomainRegistry:
         self._isp_name = isp_name
         self._set_cache_path()
         # Создаем каталог кэша, если его еще нет
-        self.rules_file.parent.mkdir(parents=True, exist_ok=True)
+        self.rules_file.parent.mkdir(exist_ok=True)
         # обновляем
         self.load_rules()
 
@@ -1583,15 +1583,15 @@ def find_ciadpi_exe():
 
 def init_app(upgrade_logging=True):
     global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
-    read_config_file()
     # определяем служебный каталог
     if APP_DIR:
         # определен в конфиге или ком. строке
         APP_DIR = Path(APP_DIR)
     else:
         APP_DIR = get_app_dir()
-    info(f'[Config] служебный каталог: {APP_DIR}')
+    info(f'[Config] Служебный каталог: {APP_DIR}')
     APP_DIR.mkdir(parents=True, exist_ok=True)
+    read_config_file()
     # Обновляем логирование
     # Если в конфиг-файле указан другой уровень логирования или путь к логу
     LOG_DIR = Path(LOG_DIR) if LOG_DIR else APP_DIR / 'log'
