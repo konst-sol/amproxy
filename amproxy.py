@@ -1687,6 +1687,9 @@ def runtime_management():
                 if params.startswith('-'):
                     dom._update('PROXY', params)
                     send(f'Для домена {domain} установлена стратегия {params}')
+                elif params == 'DIRECT':
+                    dom._update('DIRECT')
+                    send(f'Для домена {domain} установлена стратегия {params}')
                 else:
                     send(f'ERROR: {params} -- не параметры')
         elif data.startswith('update '):
@@ -1703,7 +1706,7 @@ def runtime_management():
   search <str> - вывод всех доменов в имени которых есть подстрока <str>
   info <domain> - информация о домене
   del <domain> - удаление домена из кэша
-  set <domain> <params> - установить для домена <domain> стратегию <params>
+  set <domain> <params> - установить для домена <domain> стратегию <params>; вместо <params> можно указать DIRECT - устанавливать соединение напрямую
   update <domain|url> - принудительно обновить стратегию
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
