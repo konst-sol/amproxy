@@ -39,7 +39,11 @@ from argparse import ArgumentParser
 # конфиг-файл
 from configparser import ConfigParser
 
-APP_NAME = 'amproxy'
+# класс который ведет себя как строка, но type(s('foo')) не str,
+# и поэтому не добавляется в список параметров для конфиг-файла
+class s(str): pass
+
+APP_NAME = s('amproxy')
 
 # <НАСТРОЙКИ>
 # дефолтные
@@ -49,7 +53,7 @@ PORT = 8888 # порт этой программы
 USER_PASS = '' # если пустая строка - не использовать аутентификацию
 CONTROL_PORT = 0 # порт на котором программа слушает управление
 STRATEGIES_FILE = 'params.txt' # файл со списком параметров для ciadpi (объект Path)
-CIADPI_EXE = 'ciadpi.exe' if sys.platform == 'win32' else 'ciadpi'
+CIADPI_EXE = s('ciadpi.exe' if sys.platform == 'win32' else 'ciadpi')
 CIADPI_PATH = '' # Путь к ciadpi (объект Path)
 IMPERSONATE = 'chrome120' # каким браузером прикидываемся
 APP_DIR = '' # служебный каталог программы (~/.amproxy) (объект Path)
@@ -62,7 +66,7 @@ DIRECT_FILE = 'direct.txt' # домены доступные напрямую (�
 FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
 HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
 URLS_FILE = 'urls.txt' # список urls, найденных при парсинге страницы
-JSON_CACHE_FILE = '' # Файл кэша в формате JSON (CACHE_DIR/cache.json)
+JSON_CACHE_FILE = 'cache.json' # Файл кэша в формате JSON
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 DYNAMIC_CONFIG = 1 # 0/1 Динамическое изменение настроек/стратегий при смене провайдера
 # Таймауты
@@ -72,9 +76,9 @@ SCAN_PAGE_TIMEOUT = 20. # общее время обработки страни�
 CURL_THREAD_LIMIT = 10 # сколько потоков использовать для проверки стратегий
 NUMBER_OF_TESTS = 2 # количество проверок прямой доступности и каждой стратегии
 # время устаревания разных статусов в часах:
-DIRECT_TTL = 7*24 # прямое подключение
-PROXY_TTL = 7*24 # подключение через ciadpi
-FAILED_TTL = 8 # прямое подключение если стратегия для ciadpi не найдена
+DIRECT_TTL = 7*24. # прямое подключение
+PROXY_TTL = 7*24. # подключение через ciadpi
+FAILED_TTL = 8. # прямое подключение если стратегия для ciadpi не найдена
 LOG_LEVEL = 'INFO' # уровень логирования (CRITICAL/ERROR/INFO/DEBUG)
 LOG_DIR = '' # каталог для сохранения логов (~/.amproxy/log) (объект Path)
 LOG_FILE = APP_NAME+'.log' # если пустая строка - не логировать в файл
@@ -588,7 +592,7 @@ class DomainInfo:
         res = asyncio.run(self._find_working_params(url, pre_strats))
         if res:
             if update: self._update('PROXY', res[0])
-            debug(f'найдена стратегия для {self.domain}: {res[0]}')
+            info(f'Найдена стратегия для {self.domain}: {res[0]}')
             return res
         # Если история не помогла — запускаем поиск
         # по всем остальным strategies
@@ -600,7 +604,7 @@ class DomainInfo:
         res = asyncio.run(self._find_working_params(url, remaining_strats))
         if res:
             if update: self._update('PROXY', res[0])
-            debug(f'найдена стратегия для {self.domain}: {res[0]}')
+            info(f'Найдена стратегия для {self.domain}: {res[0]}')
             return res
         # подбор параметров закончился неудачей - соединяем напрямую
         if update: self._update('FAILED')
@@ -628,7 +632,7 @@ class DomainInfo:
                     return None
                 proxy_url = f'socks5h://127.0.0.1:{port}'
                 proxies = {'http': proxy_url, 'https': proxy_url}
-                # Пытаемся проверить конфиг NUMBER_OF_TESTS раз
+                # Пытаемся проверить стратегию NUMBER_OF_TESTS раз
                 for _ in range(NUMBER_OF_TESTS):
                     if found_event.is_set():
                         return None
@@ -883,8 +887,8 @@ class DomainInfo:
                     # новый домен найденный в content
                     # один поток для одного домена
                     tested_hosts.append(host)
-                    th = threading.Thread(target=dom.run_test, args=(tested_url, True))
-                    th.daemon = True
+                    th = threading.Thread(target=dom.run_test, daemon=True,
+                                          args=(tested_url, True))
                     th.start()
                     threads.append(th)
 
@@ -937,8 +941,7 @@ class DomainRegistry:
         self.failed_file = cache_path / FAILED_FILE
         self.history_file = cache_path / HISTORY_FILE
         self.urls_file = cache_path / URLS_FILE
-        self.json_file = cache_path / (JSON_CACHE_FILE if JSON_CACHE_FILE
-                                       else 'cache.json')
+        self.json_file = cache_path / JSON_CACHE_FILE
 
     #
     # Методы dict
@@ -1246,7 +1249,10 @@ def get_current_ip():
                 ip = response.text.strip()
                 if ip.startswith('{'): # для myip.com (он возвращает json)
                     ip = response.json().get('ip')
-                socket.inet_pton(socket.AF_INET, ip) # проверка корректности ip
+                try:
+                    socket.inet_pton(socket.AF_INET, ip) # проверка корректности ip
+                except:
+                    continue
                 return ip
         except Exception as err:
             debug(err)
