@@ -1584,16 +1584,6 @@ def find_ciadpi_exe():
 def init_app(upgrade_logging=True):
     global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
     read_config_file()
-    # Обновляем логирование
-    # Если в конфиг-файле указан другой уровень логирования или путь к логу
-    if upgrade_logging:
-        # настраиваем на работу через queue для многопоточности (режим сервера)
-        log_manager.upgrade()
-    else:
-        # настраиваем только уровень и форматирование для использования print
-        # (режим поиска стратегии)
-        log_manager.set_formatter()
-        log_manager.update_log_level()
     # определяем служебный каталог
     if APP_DIR:
         # определен в конфиге или ком. строке
@@ -1602,10 +1592,20 @@ def init_app(upgrade_logging=True):
         APP_DIR = get_app_dir()
     info(f'[Config] служебный каталог: {APP_DIR}')
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR = Path(CACHE_DIR) if CACHE_DIR else APP_DIR / 'cache'
-    CACHE_DIR.mkdir(exist_ok=True)
+    # Обновляем логирование
+    # Если в конфиг-файле указан другой уровень логирования или путь к логу
     LOG_DIR = Path(LOG_DIR) if LOG_DIR else APP_DIR / 'log'
     LOG_DIR.mkdir(exist_ok=True)
+    if upgrade_logging:
+        # настраиваем на работу через queue для многопоточности (режим сервера)
+        log_manager.upgrade()
+    else:
+        # настраиваем только уровень и форматирование для использования print
+        # (режим поиска стратегии)
+        log_manager.set_formatter()
+        log_manager.update_log_level()
+    CACHE_DIR = Path(CACHE_DIR) if CACHE_DIR else APP_DIR / 'cache'
+    CACHE_DIR.mkdir(exist_ok=True)
     USER_RULES_FILE = (Path(USER_RULES_FILE) if USER_RULES_FILE
                        else APP_DIR / 'user-rules.txt')
     STRATEGIES_FILE = Path(STRATEGIES_FILE)
@@ -1619,7 +1619,6 @@ def init_app(upgrade_logging=True):
     if not STRATEGIES_FILE.exists():
         error(f'Не найден файл стратегий: {STRATEGIES_FILE}. Выход')
         sys.exit(1)
-
     # Глобальный реестр доменов
     # (кэш не загружаем)
     global domain_registry
