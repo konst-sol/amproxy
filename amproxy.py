@@ -15,6 +15,7 @@ import shutil
 from datetime import timedelta, datetime
 from pathlib import Path
 from fnmatch import fnmatch
+import json
 # для сети
 import socket
 import socks
@@ -61,6 +62,7 @@ DIRECT_FILE = 'direct.txt' # домены доступные напрямую (�
 FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
 HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
 URLS_FILE = 'urls.txt' # список urls, найденных при парсинге страницы
+JSON_CACHE_FILE = '' # Файл кэша в формате JSON (CACHE_DIR/cache.json)
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 DYNAMIC_CONFIG = 1 # 0/1 Динамическое изменение настроек/стратегий при смене провайдера
 # Таймауты
@@ -934,6 +936,8 @@ class DomainRegistry:
         self.failed_file = cache_path / FAILED_FILE
         self.history_file = cache_path / HISTORY_FILE
         self.urls_file = cache_path / URLS_FILE
+        self.json_file = cache_path / (JSON_CACHE_FILE if JSON_CACHE_FILE
+                                       else 'cache.json')
 
     #
     # Методы dict
@@ -997,35 +1001,41 @@ class DomainRegistry:
         if not filename.exists():
             return
         with filename.open(encoding='utf-8') as f:
-            lineno = 0
             for s in f:
-                lineno += 1
-                s = s.split('#')[0] # убираем комментарии
                 s = s.strip()
                 if not s: continue
                 if rules:
                     # RULES_FILE
                     domain, test_time, params = s.split(maxsplit=2)
                     dom = DomainInfo(domain, status, params, int(test_time))
-                elif status == 'USER':
-                    # USER_RULES_FILE
-                    domain, params = s.split(maxsplit=1)
-                    if params in ('DIRECT', 'BLOCK'):
-                        dom = DomainInfo(domain, params, user_config=True)
-                    elif params.startswith('EXTERN'):
-                        dom = DomainInfo(domain, 'EXTERN', user_config=True,
-                                         extern_proxy=params[7:])
-                    else:
-                        if not params.startswith('-'):
-                            error(f'ошибка в файле {USER_RULES_FILE}: '
-                                  f'строка {lineno}: не параметры: {params}')
-                        else:
-                            dom = DomainInfo(domain, 'PROXY', params,
-                                             user_config=True)
                 else:
                     # DIRECT_FILE и FAILED_FILE
                     domain, test_time = s.split(maxsplit=1)
                     dom = DomainInfo(domain, status, test_time=int(test_time))
+                self[domain] = dom
+
+    def _load_user_rules(self):
+        if not USER_RULES_FILE.exists():
+            return
+        with USER_RULES_FILE.open(encoding='utf-8') as f:
+            lineno = 0
+            for s in f:
+                lineno += 1
+                s = s.split('#')[0] # убираем комментарии
+                s = s.strip()
+                if not s: continue
+                domain, params = s.split(maxsplit=1)
+                if params in ('DIRECT', 'BLOCK'):
+                    dom = DomainInfo(domain, params, user_config=True)
+                elif params.startswith('EXTERN'):
+                    dom = DomainInfo(domain, 'EXTERN', user_config=True,
+                                     extern_proxy=params[7:])
+                else:
+                    if not params.startswith('-'):
+                        error(f'ошибка в файле {USER_RULES_FILE}: '
+                              f'строка {lineno}: не параметры: {params}')
+                    else:
+                        dom = DomainInfo(domain, 'PROXY', params, user_config=True)
                 self[domain] = dom
 
     def load_rules(self):
@@ -1034,7 +1044,7 @@ class DomainRegistry:
             self._load(self.rules_file, 'PROXY', True)
             self._load(self.direct_file, 'DIRECT')
             self._load(self.failed_file, 'FAILED')
-            self._load(USER_RULES_FILE, 'USER')
+            self._load_user_rules()
             info(f'Загружены правила для {len(self)} доменов')
             # загружаем историю параметров
             if self.history_file.exists():
@@ -1074,10 +1084,11 @@ class DomainRegistry:
               self.history_file.open('w', encoding='utf-8') as h,
               self.urls_file.open('w', encoding='utf-8') as u):
             for dom in self.values():
+                if dom.user_config:
+                    # игнорируем пользовательские стратегии
+                    continue
                 if dom.status == 'PROXY':
-                    if not dom.user_config:
-                        # игнорируем пользовательские стратегии
-                        print(f'{dom.domain} {dom.test_time} {dom.params}', file=r)
+                    print(f'{dom.domain} {dom.test_time} {dom.params}', file=r)
                 elif dom.status == 'DIRECT':
                     print(f'{dom.domain} {dom.test_time}', file=d)
                 elif dom.status == 'FAILED':
@@ -1087,6 +1098,8 @@ class DomainRegistry:
                 for url in dom.urls:
                     print(url, file=u)
 
+        self.save_to_json()
+
     def update_user_rules(self):
         # Обновление пользовательских стратегий
         info('[Config] обновление пользовательских стратегий')
@@ -1094,8 +1107,39 @@ class DomainRegistry:
             # Удаляем все пользовательские стратегии
             self._user_data = {}
             self._wildcard_keys = set()
-            # Обновляем 
-            self._load(USER_RULES_FILE, 'USER')
+            # Обновляем
+            self._load_user_rules()
+
+    # JSON
+    def save_to_json(self):
+        file_path = self.json_file
+        debug(f'сохраняем в JSON: {file_path}')
+        prepared_data = {}
+        for domain, dom in self._auto_data.items():
+            # Формируем словарь нужных атрибутов
+            prepared_data[domain] = {
+                'status': dom.status,
+                'params': dom.params,
+                'test_time': dom.test_time,
+                'history_params': dom.history_params,
+                'urls': list(dom.urls),  # Конвертируем set в list для JSON
+            }
+        # Записываем данные в файл с отступами для читаемости
+        with file_path.open('w', encoding='utf-8') as f:
+            json.dump(prepared_data, f, ensure_ascii=False, indent=4)
+
+    def load_from_json(self):
+        file_path = self.json_file
+        with file_path.open(encoding='utf-8') as f:
+            data = json.load(f)
+        for domain, dom_dict in data.items():
+            dom = DomainInfo(domain)
+            # Конвертируем urls обратно в set перед записью в атрибуты
+            dom_dict['urls'] = set(dom_dict['urls'])
+            # Быстро копируем все ключи словаря в атрибуты объекта
+            dom.__dict__.update(dom_dict)
+            self._auto_data[domain] = dom
+
 
     #
     # Остальные методы
@@ -1493,9 +1537,8 @@ def handle_client(client_socket, address):
             remote_socket.sendall(out_req.encode('utf-8'))
 
         # Двунаправленная пересылка
-        th = threading.Thread(target=pipe, args=(client_socket, remote_socket, dom))
-        th.daemon = True
-        th.start()
+        threading.Thread(target=pipe, daemon=True,
+                         args=(client_socket, remote_socket, dom)).start()
         # Основной поток обрабатывает обратное направление
         pipe(remote_socket, client_socket, dom)
 
@@ -1688,9 +1731,8 @@ def start_proxy():
     try:
         while True:
             client_sock, addr = server.accept()
-            t = threading.Thread(target=handle_client, args=(client_sock,addr),
-                                 daemon=True)
-            t.start()
+            threading.Thread(target=handle_client, daemon=True,
+                             args=(client_sock,addr)).start()
     except KeyboardInterrupt:
         # нужно? (Используем root-логгер или прямой print, так как потоки могут закрываться)
         info('Shutting down...')
