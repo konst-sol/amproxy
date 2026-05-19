@@ -8,6 +8,18 @@ from configparser import ConfigParser
 
 sys.dont_write_bytecode = True # чтобы не создавать __pycache__/ в текущем каталоге
 
+
+class CtrlArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # Выводим стандартный блок использования (usage)
+        self.print_usage(sys.stderr)
+        # Выводим текст конкретной ошибки
+        sys.stderr.write(f"{self.prog}: error: {message}\n")
+        # Выводим подсказку
+        sys.stderr.write(f'Try "{self.prog} --help" for more information.\n')
+        sys.exit(2)
+
+
 def send_command(command, host, port):
     '''Отправляет текстовую команду на управляющий порт прокси-сервера.'''
     try:
@@ -53,19 +65,20 @@ def get_port_from_config(config_path):
 
 def main():
     # Настраиваем парсер аргументов командной строки
-    parser = argparse.ArgumentParser(
+    parser = CtrlArgumentParser(
+        add_help=False,
         description='Утилита для управления прокси-сервером.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Примеры:
   Вывести статистику использования стратегий:
-    python ctrl.py stats
+    ctrl.py stats
   Удалить example.com из кэша:
-    python ctrl.py del example.com
+    ctrl.py del example.com
   Установить для домена www.youtube.com стратегию -o1 -a1 (используем "--" чтобы указать что опции для ctrl.py закончились):
-    python ctrl.py -- set www.youtube.com -o1 -a1
+    ctrl.py -- set www.youtube.com -o1 -a1
 
 Для получения полного списка команд отправьте help:
-  python ctrl.py help\n\n'''
+  ctrl.py help\n\n'''
     )
     # Обязательный аргумент — сама команда
     parser.add_argument(
@@ -75,7 +88,7 @@ def main():
     )
     # Необязательные аргументы для смены хоста и порта
     parser.add_argument(
-        '--host',
+        '-h', '--host',
         default='127.0.0.1',
         help='IP-адрес управляющего сервера (по умолчанию 127.0.0.1)'
     )
@@ -87,6 +100,10 @@ def main():
     parser.add_argument(
         '-c', '--config',
         help='Путь к конфиг-файлу прокси'
+    )
+    # Вручную добавляем --help
+    parser.add_argument(
+        '--help', action='help', help='Показать это сообщение и выйти'
     )
     args = parser.parse_args()
     if args.port:
