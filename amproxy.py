@@ -362,11 +362,12 @@ def read_config_file():
 
 def add_new_section(isp_name):
     # Дописывает новую секцию в конец конфиг-файла (для watch_network)
-    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-        if f'\n[{isp_name}]' in f.read():
-            return
+    config = ConfigParser(interpolation=None)
+    config.read((CONFIG_PATH), encoding='utf-8')
+    if isp_name in config:
+        return
     debug(f'Новый провайдер. Добавляем секцию [{isp_name}] в конфиг-файл')
-    with open(CONFIG_PATH, 'a', encoding='utf-8') as f:
+    with CONFIG_PATH.open('a', encoding='utf-8') as f:
         f.write(f'# Секция добавлена автоматически\n[{isp_name}]\n\n')
 
 # </CONFIG_FILE>
@@ -1749,7 +1750,7 @@ def start_proxy():
     server.bind((HOST, PORT))
     server.listen()
 
-    info(f'** {time.strftime("%d.%m.%Y %H:%M%S")} Прокси готов на порту {PORT} '
+    info(f'** {time.strftime("%d.%m.%Y %H:%M:%S")} Прокси готов на порту {PORT} '
          f'(PID: {os.getpid()}) **')
 
     try:
