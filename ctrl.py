@@ -56,7 +56,16 @@ def main():
     parser = argparse.ArgumentParser(
         description='Утилита для управления прокси-сервером.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Для получения списка команд отправьте help:\n  python ctrl.py help\n'
+        epilog='''Примеры:
+  Вывести статистику использования стратегий:
+    python ctrl.py stats
+  Удалить example.com из кэша:
+    python ctrl.py del example.com
+  Установить для домена www.youtube.com стратегию -o1 -a1 (используем "--" чтобы указать что опции для ctrl.py закончились):
+    python ctrl.py -- set www.youtube.com -o1 -a1
+
+Для получения полного списка команд отправьте help:
+  python ctrl.py help\n\n'''
     )
     # Обязательный аргумент — сама команда
     parser.add_argument(
