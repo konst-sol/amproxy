@@ -1677,6 +1677,18 @@ def runtime_management():
         elif data.startswith('search '):
             pat = data[7:].strip()
             send('\n'.join(domain_registry.search(pat)))
+        elif data.startswith('set '):
+            splited = data.split(maxsplit=2)
+            if len(splited) != 3:
+                send('ERROR: использование: set <domain> <params>')
+            else:
+                domain, params = splited[1:]
+                dom = domain_registry.get_domain_info(domain)
+                if params.startswith('-'):
+                    dom._update('PROXY', params)
+                    send(f'Для домена {domain} установлена стратегия {params}')
+                else:
+                    send(f'ERROR: {params} -- не параметры')
         elif data.startswith('update '):
             url = data[7:]
             if not url.startswith(('http://', 'https://')):
@@ -1691,6 +1703,7 @@ def runtime_management():
   search <str> - вывод всех доменов в имени которых есть подстрока <str>
   info <domain> - информация о домене
   del <domain> - удаление домена из кэша
+  set <domain> <params> - установить для домена <domain> стратегию <params>
   update <domain|url> - принудительно обновить стратегию
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
