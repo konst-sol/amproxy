@@ -52,7 +52,7 @@ def send_command(command, host, port):
         sys.exit(1)
 
 def get_port_from_config(config_path):
-    config = ConfigParser(interpolation=None)
+    config = ConfigParser(interpolation=None, inline_comment_prefixes=('#', ';'))
     config.read((config_path), encoding='utf-8')
     for section in config.sections():
         if 'control_port' in config[section]:

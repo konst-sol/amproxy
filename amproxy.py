@@ -37,7 +37,7 @@ import atexit
 # аргументы ком. строки
 from argparse import ArgumentParser
 # конфиг-файл
-from configparser import ConfigParser
+import configparser
 
 # класс который ведет себя как строка, но type(s('foo')) не str,
 # и поэтому не добавляется в список параметров для конфиг-файла
@@ -269,6 +269,13 @@ def parse_cli_args():
 # </CLI>
 
 # <CONFIG_FILE>
+class ConfigParser(configparser.ConfigParser):
+    def __init__(self):
+        super().__init__(
+            interpolation=None, # чтобы использовать плейсхолдеры
+            inline_comment_prefixes=('#', ';'), # комментарий в конце строки
+            )
+
 def get_app_dir():
     if sys.platform == 'win32':
         # без точки
@@ -344,7 +351,7 @@ def read_config_file():
         with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
     # отключаем interpolation, чтобы в конфиге можно было использовать `%`
-    config = ConfigParser(interpolation=None)
+    config = ConfigParser()
     res = config.read((SYSTEM_CONFIG_PATH, CONFIG_PATH), encoding='utf-8')
     info(f'Прочитаны конфиг-файлы: {", ".join(res)}')
 
@@ -362,7 +369,7 @@ def read_config_file():
 
 def add_new_section(isp_name):
     # Дописывает новую секцию в конец конфиг-файла (для watch_network)
-    config = ConfigParser(interpolation=None)
+    config = ConfigParser()
     config.read((CONFIG_PATH), encoding='utf-8')
     if isp_name in config:
         return
@@ -1182,7 +1189,7 @@ class DomainRegistry:
         debug(f'новый ISP: {isp_name}. Перезагрузка кэша')
         # Обновление настроек
         # считываем настройки из раздела ISP
-        config = ConfigParser(interpolation=None)
+        config = ConfigParser()
         config.read(CONFIG_PATH, encoding='utf-8')
         for key, value in config.items(isp_name):
             _set_config_value(key, value)
