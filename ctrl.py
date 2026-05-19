@@ -68,7 +68,7 @@ def main():
     parser.add_argument(
         '--host',
         default='127.0.0.1',
-        help=f'IP-адрес управляющего сервера (по умолчанию: 127.0.0.1)'
+        help='IP-адрес управляющего сервера (по умолчанию 127.0.0.1)'
     )
     parser.add_argument(
         '-p', '--port',

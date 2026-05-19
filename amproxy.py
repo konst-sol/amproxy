@@ -337,6 +337,7 @@ def read_config_file():
     find_config_file()
     if not CONFIG_PATH.exists():
         info(f'[Config] Конфиг не найден. Создаем дефолтный; {CONFIG_PATH}')
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open('w', encoding='utf-8') as f:
             f.write('[DEFAULT]\n\n')
     # отключаем interpolation, чтобы в конфиге можно было использовать `%`
@@ -894,6 +895,7 @@ class DomainInfo:
             return params
 
     def info(self):
+        # для runtime_management
         info = {
             'domain': self.domain,
             'status': self.status,
