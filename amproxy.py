@@ -58,14 +58,7 @@ CIADPI_PATH = '' # Путь к ciadpi (объект Path)
 IMPERSONATE = 'chrome120' # каким браузером прикидываемся
 APP_DIR = '' # служебный каталог программы (~/.amproxy) (объект Path)
 CACHE_DIR = '' # каталог для кэша (~/.amproxy/cache) (объект Path)
-# Файлы для кэширования информации о проверках по одному домену на строке
-# в скобках - формат строки
-RULES_FILE = 'rules.txt' # стратегии (домен<пробел>время_проведения_теста<пробел>стратегия)
 USER_RULES_FILE = '' # 'user-rules.txt' пользовательские стратегии (домен<пробел>стратегия)
-DIRECT_FILE = 'direct.txt' # домены доступные напрямую (домен<пробел>время_проведения_теста)
-FAILED_FILE = 'failed.txt' # домены для которых стратегия не найдена (домен<пробел>время_проведения_теста)
-HISTORY_FILE = 'history.txt' # стратегии применявшиеся ранее (домен<пробел>стратегия_1|стратегия_2|...)
-URLS_FILE = 'urls.txt' # список urls, найденных при парсинге страницы
 JSON_CACHE_FILE = 'cache.json' # Файл кэша в формате JSON
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 DYNAMIC_CONFIG = 1 # 0/1 Динамическое изменение настроек/стратегий при смене провайдера
@@ -953,11 +946,6 @@ class DomainRegistry:
             # кэш в подкаталоге с именем провайдера
             cache_path = CACHE_DIR / self._isp_name
         debug(f'каталог кэша: {cache_path}')
-        self.rules_file = cache_path / RULES_FILE
-        self.direct_file = cache_path / DIRECT_FILE
-        self.failed_file = cache_path / FAILED_FILE
-        self.history_file = cache_path / HISTORY_FILE
-        self.urls_file = cache_path / URLS_FILE
         self.json_file = cache_path / JSON_CACHE_FILE
 
     #
@@ -1018,23 +1006,6 @@ class DomainRegistry:
     #
     # Загрузка/сохранение кэша
     #
-    def _load(self, filename, status, rules=False):
-        if not filename.exists():
-            return
-        with filename.open(encoding='utf-8') as f:
-            for s in f:
-                s = s.strip()
-                if not s: continue
-                if rules:
-                    # RULES_FILE
-                    domain, test_time, params = s.split(maxsplit=2)
-                    dom = DomainInfo(domain, status, params, int(test_time))
-                else:
-                    # DIRECT_FILE и FAILED_FILE
-                    domain, test_time = s.split(maxsplit=1)
-                    dom = DomainInfo(domain, status, test_time=int(test_time))
-                self[domain] = dom
-
     def _load_user_rules(self):
         if not USER_RULES_FILE.exists():
             return
@@ -1061,70 +1032,19 @@ class DomainRegistry:
 
     def load_rules(self):
         debug('загрузка правил')
-        if 0:
-            with self._lock:
-                self.load_from_json()
-                self._load_user_rules()
-                info(f'Загружены правила для {len(self)} доменов')
-                return
         with self._lock:
-            self._load(self.rules_file, 'PROXY', True)
-            self._load(self.direct_file, 'DIRECT')
-            self._load(self.failed_file, 'FAILED')
+            self.load_from_json()
             self._load_user_rules()
             info(f'Загружены правила для {len(self)} доменов')
-            # загружаем историю параметров
-            if self.history_file.exists():
-                with self.history_file.open(encoding='utf-8') as f:
-                    for s in f:
-                        s = s.strip()
-                        if not s: continue
-                        domain, params = s.split(maxsplit=1)
-                        params = params.split('|')
-                        dom = self.get(domain)
-                        if dom:
-                            dom.history_params = params
-            # загружаем urls
-            if self.urls_file.exists():
-                with self.urls_file.open(encoding='utf-8') as f:
-                    for url in f:
-                        url = url.rstrip('\r\n')
-                        parsed_url = urlparse(url)
-                        dom = self.get(parsed_url.hostname)
-                        if dom:
-                            dom.urls.add(url)
 
     def save_rules(self):
         debug('сохранение правил')
         if BACKUP_FILES:
-            for fn in (self.rules_file, self.direct_file,
-                       self.failed_file, self.history_file):
-                if fn.exists():
-                    # Создаем резервную копию
-                    # .with_suffix добавит/заменит расширение
-                    bak_file = fn.with_suffix(fn.suffix + '.bak')
-                    fn.replace(bak_file)
-        # Записываем данные
-        with (self.rules_file.open('w', encoding='utf-8') as r,
-              self.direct_file.open('w', encoding='utf-8') as d,
-              self.failed_file.open('w', encoding='utf-8') as f,
-              self.history_file.open('w', encoding='utf-8') as h,
-              self.urls_file.open('w', encoding='utf-8') as u):
-            for dom in self.values():
-                if dom.user_config:
-                    # игнорируем пользовательские стратегии
-                    continue
-                if dom.status == 'PROXY':
-                    print(f'{dom.domain} {dom.test_time} {dom.params}', file=r)
-                elif dom.status == 'DIRECT':
-                    print(f'{dom.domain} {dom.test_time}', file=d)
-                elif dom.status == 'FAILED':
-                    print(f'{dom.domain} {dom.test_time}', file=f)
-                if dom.history_params:
-                    print(f'{dom.domain} {"|".join(dom.history_params)}', file=h)
-                for url in dom.urls:
-                    print(url, file=u)
-
+            if JSON_CACHE_FILE.exists():
+                # Создаем резервную копию
+                # .with_suffix добавит/заменит расширение
+                bak_file = fn.with_suffix(fn.suffix + '.bak')
+                fn.replace(bak_file)
         self.save_to_json()
 
     def update_user_rules(self):
@@ -1224,7 +1144,7 @@ class DomainRegistry:
         self._isp_name = isp_name
         self._set_cache_path()
         # Создаем каталог кэша, если его еще нет
-        self.rules_file.parent.mkdir(exist_ok=True)
+        self.json_file.parent.mkdir(exist_ok=True)
         # обновляем
         self.load_rules()
 
