@@ -1097,9 +1097,8 @@ class DomainRegistry:
             self._load_user_rules()
 
     # JSON
-    def save_to_json(self):
-        file_path = self.json_file
-        debug(f'сохраняем в JSON: {file_path}')
+    def cache_to_dict(self):
+        # преобразует кэш в dict для json
         prepared_data = {}
         for domain, dom in self._auto_data.items():
             # Формируем словарь нужных атрибутов
@@ -1109,14 +1108,20 @@ class DomainRegistry:
             dom_dict['test_time'] = dom.test_time
             if dom.history_params:
                 dom_dict['history_params'] = dom.history_params
-            if dom.urls:
-                dom_dict['urls'] = list(dom.urls) # Конвертируем set в list для JSON
+            #if dom.urls:
+            #    dom_dict['urls'] = list(dom.urls) # Конвертируем set в list для JSON
             if dom.count:
                 dom_dict['count'] = dom.count
             prepared_data[domain] = dom_dict
+        return prepared_data
+
+    def get_json(self):
+        return json.dumps(self.cache_to_dict(), ensure_ascii=False, indent=4)
+
+    def save_to_json(self):
         # Записываем данные в файл с отступами для читаемости
-        with file_path.open('w', encoding='utf-8') as f:
-            json.dump(prepared_data, f, ensure_ascii=False, indent=4)
+        with self.json_file.open('w', encoding='utf-8') as f:
+            json.dump(self.cache_to_dict(), f, ensure_ascii=False, indent=4)
 
     def load_from_json(self):
         with self.json_file.open(encoding='utf-8') as f:
@@ -1686,6 +1691,8 @@ def runtime_management():
             dom = domain_registry.get_domain_info(domain)
             params = dom.run_test(url, force=True)
             send(f'Найдена стратегия для {domain}: {params}')
+        elif data == 'json':
+            send(domain_registry.get_json())
         elif data == 'help':
             send('''Доступные команды:
   search <str> - вывод всех доменов в имени которых есть подстрока <str>
