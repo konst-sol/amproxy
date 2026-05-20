@@ -31,7 +31,6 @@ from bs4 import BeautifulSoup # 16k
 from urllib.parse import urljoin, urlparse
 # для логирования
 import logging, logging.handlers
-from logging import exception as print_exc
 import queue
 import atexit
 import traceback
@@ -165,10 +164,12 @@ class LogManager:
         # останавливаем логирование на выходе
         atexit.register(self.stop)
         # функции вывода логов
-        global info, debug, error
+        global info, debug, error, print_exc
         info = self.logger.info
         debug = self.logger.debug
         error = self.logger.error
+        print_exc = self.log_exception_to_file # вызывается без аргументов
+
         self.exc_lock = threading.Lock()
 
     def upgrade(self):
@@ -206,9 +207,9 @@ class LogManager:
         self.set_formatter()
         self.update_log_level()
 
-        if EXCEPTIONS_LOG_FILE:
-            # запись исключений в отдельный файл
-            threading.excepthook = self.exception_handler
+        # Запись исключений в отдельный файл
+        # Регистрируем в качестве глобального обработчика для потоков
+        threading.excepthook = self.log_exception_to_file
 
         self.listener.start()
 
@@ -223,26 +224,36 @@ class LogManager:
         if self.console_handler:
             self.console_handler.setFormatter(LevelFormatter())
 
-    def exception_handler(self, args):
-        # Перехватывает любые неотловленные ошибки в любых потоках
-        # вывод в консоль
-        error(
-            f'Необработанное исключение в потоке {args.thread.name}: '
-            f' {args.exc_type.__name__}: {args.exc_value}',
-            exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
-        )
-        # вывод в файл
-        exc_lines = traceback.format_exception(args.exc_type, args.exc_value,
-                                               args.exc_traceback)
-        # Форматируем строку записи
+    def log_exception_to_file(self, args=None):
+        if args is not None:
+            # Вызов из threading.excepthook (поток упал)
+            exc_type = args.exc_type
+            exc_value = args.exc_value
+            exc_traceback = args.exc_traceback
+            thread_name = args.thread.name
+        else:
+            # Ручной вызов из блока except (Python 3.9+)
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            thread_name = threading.current_thread().name
+        # Если функция вызвана вне блока except и без аргументов, ничего не делаем
+        if exc_type is None:
+            return
+        # Формируем и пишем лог
+        exc_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = (f'{timestamp} [{args.thread.name}] EXCEPTION:\n'
-                     f'{"".join(exc_lines)}\n')
-        # Безопасно пишем в файл
-        with self.exc_lock:
-            file_path = LOG_DIR / EXCEPTIONS_LOG_FILE
-            with file_path.open('a', encoding='utf-8') as f:
-                f.write(log_entry)
+        log_entry = f'{timestamp} [{thread_name}] EXCEPTION:\n{"".join(exc_lines)}'
+        # в консоль и лог-файл
+        error(log_entry)
+        # в отдельный файл
+        if EXCEPTIONS_LOG_FILE:
+            try:
+                with self.exc_lock:
+                    file_path = LOG_DIR / EXCEPTIONS_LOG_FILE
+                    with file_path.open('a', encoding='utf-8') as f:
+                        print(log_entry, file=f)
+            except Exception:
+                sys.stderr.write('Ошибка записи в exceptions.log!\n')
+                traceback.print_exc()
 
     def stop(self):
         # Безопасно останавливает listener, избегая гонки потоков при Ctrl+C.
@@ -1525,8 +1536,8 @@ def handle_client(client_socket, address):
         # Основной поток обрабатывает обратное направление
         pipe(remote_socket, client_socket, dom)
 
-    except Exception as err:
-        print_exc(str(err))
+    except Exception:
+        print_exc()
     finally:
         # Важно закрыть оба сокета, чтобы освободить дескрипторы
         for s in [client_socket, remote_socket]:
