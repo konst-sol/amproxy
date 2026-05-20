@@ -34,6 +34,7 @@ import logging, logging.handlers
 from logging import exception as print_exc
 import queue
 import atexit
+import traceback
 # аргументы ком. строки
 from argparse import ArgumentParser
 # конфиг-файл
@@ -75,6 +76,7 @@ FAILED_TTL = 8. # прямое подключение если стратеги�
 LOG_LEVEL = 'INFO' # уровень логирования (CRITICAL/ERROR/INFO/DEBUG)
 LOG_DIR = '' # каталог для сохранения логов (~/.amproxy/log) (объект Path)
 LOG_FILE = APP_NAME+'.log' # если пустая строка - не логировать в файл
+EXCEPTIONS_LOG_FILE = 'exceptions.log' # файл для записей exceptions
 # форматы вывода для разных уровней
 LOG_INFO_FORMAT = '%(message)s'
 LOG_DEBUG_FORMAT = '[D] %(filename)s:%(lineno)d: %(funcName)s: %(message)s'
@@ -167,6 +169,7 @@ class LogManager:
         info = self.logger.info
         debug = self.logger.debug
         error = self.logger.error
+        self.exc_lock = threading.Lock()
 
     def upgrade(self):
         # Переводит логирование на асинхронную очередь с выводом в консоль
@@ -203,6 +206,10 @@ class LogManager:
         self.set_formatter()
         self.update_log_level()
 
+        if EXCEPTIONS_LOG_FILE:
+            # запись исключений в отдельный файл
+            threading.excepthook = self.exception_handler
+
         self.listener.start()
 
     def update_log_level(self):
@@ -216,10 +223,31 @@ class LogManager:
         if self.console_handler:
             self.console_handler.setFormatter(LevelFormatter())
 
+    def exception_handler(self, args):
+        # Перехватывает любые неотловленные ошибки в любых потоках
+        # вывод в консоль
+        error(
+            f'Необработанное исключение в потоке {args.thread.name}: '
+            f' {args.exc_type.__name__}: {args.exc_value}',
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+        # вывод в файл
+        exc_lines = traceback.format_exception(args.exc_type, args.exc_value,
+                                               args.exc_traceback)
+        # Форматируем строку записи
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = (f'{timestamp} [{args.thread.name}] EXCEPTION:\n'
+                     f'{"".join(exc_lines)}\n')
+        # Безопасно пишем в файл
+        with self.exc_lock:
+            file_path = LOG_DIR / EXCEPTIONS_LOG_FILE
+            with file_path.open('a', encoding='utf-8') as f:
+                f.write(log_entry)
+
     def stop(self):
         # Безопасно останавливает listener, избегая гонки потоков при Ctrl+C.
         # Проверяем, существует ли объект listener и инициализирован ли его поток
-        if self.listener and getattr(self.listener, "_thread", None) is not None:
+        if self.listener and getattr(self.listener, '_thread', None) is not None:
             try:
                 self.listener.stop()
             except AttributeError:
@@ -282,7 +310,7 @@ def find_config_file():
     # Поиск конфиг-файла в стандартных местах
     global CONFIG_PATH, SYSTEM_CONFIG_PATH
     # системный конфиг
-    if sys.platform == "win32":
+    if sys.platform == 'win32':
         SYSTEM_CONFIG_PATH = (Path(os.environ.get('ProgramData', 'C:\\ProgramData'))
                               / APP_NAME / CONFIG_NAME)
     else:
@@ -1576,9 +1604,9 @@ def init_app(proxy_mode=True):
     # (кэш не загружаем)
     global domain_registry
     domain_registry = DomainRegistry() # {domain: DomainInfo}
-    load_strategies()
     if proxy_mode:
         domain_registry.load_rules() # Загрузка кэша
+    load_strategies()
 
 
 def runtime_management():
