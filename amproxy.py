@@ -482,7 +482,9 @@ class DomainInfo:
         self.history_params = []  # Список стратегий, которые работали раньше
         self.user_config = user_config # Стратегия задана пользователем
         self.urls = set()
+        self.count = 0 # кол-во прямых запросов от клиентов
         self.lock = threading.Lock() # чтобы не запускать несколько run_test одновременно
+        self.count_lock = threading.Lock()
 
     def _update(self, status, params=None):
         # Обновляем status, params и test_time
@@ -906,6 +908,10 @@ class DomainInfo:
 
             return params
 
+    def increment_count(self):
+        with self.count_lock:
+            self.count += 1
+
     def info(self):
         # для runtime_management
         info = {
@@ -921,6 +927,8 @@ class DomainInfo:
         if self.history_params:
             info['history_params'] = '|'.join(self.history_params)
         info['user_config'] = self.user_config
+        if self.count:
+            info['count'] = self.count
         #self.urls = set()
         return info
 
@@ -1053,6 +1061,12 @@ class DomainRegistry:
 
     def load_rules(self):
         debug('загрузка правил')
+        if 0:
+            with self._lock:
+                self.load_from_json()
+                self._load_user_rules()
+                info(f'Загружены правила для {len(self)} доменов')
+                return
         with self._lock:
             self._load(self.rules_file, 'PROXY', True)
             self._load(self.direct_file, 'DIRECT')
@@ -1138,6 +1152,8 @@ class DomainRegistry:
                 dom_dict['history_params'] = dom.history_params
             if dom.urls:
                 dom_dict['urls'] = list(dom.urls) # Конвертируем set в list для JSON
+            if dom.count:
+                dom_dict['count'] = dom.count
             prepared_data[domain] = dom_dict
         # Записываем данные в файл с отступами для читаемости
         with file_path.open('w', encoding='utf-8') as f:
@@ -1149,7 +1165,8 @@ class DomainRegistry:
         for domain, dom_dict in data.items():
             dom = DomainInfo(domain)
             # Конвертируем urls обратно в set перед записью в атрибуты
-            dom_dict['urls'] = set(dom_dict['urls'])
+            if 'urls' in dom_dict:
+                dom_dict['urls'] = set(dom_dict['urls'])
             # Быстро копируем все ключи словаря в атрибуты объекта
             dom.__dict__.update(dom_dict)
             self._auto_data[domain] = dom
@@ -1500,6 +1517,7 @@ def handle_client(client_socket, address):
         if dom.status == 'EXTERN':
             params = 'EXTERN'
         else:
+            dom.increment_count()
             params = dom.run_test(url) # получаем стратегию или DIRECT
 
         # Подключение к серверу
