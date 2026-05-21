@@ -1108,15 +1108,15 @@ class DomainRegistry:
             dom_dict['test_time'] = dom.test_time
             if dom.history_params:
                 dom_dict['history_params'] = dom.history_params
-            #if dom.urls:
-            #    dom_dict['urls'] = list(dom.urls) # Конвертируем set в list для JSON
+            if dom.urls:
+                dom_dict['urls'] = list(dom.urls) # Конвертируем set в list для JSON
             if dom.count:
                 dom_dict['count'] = dom.count
             prepared_data[domain] = dom_dict
         return prepared_data
 
     def get_json(self):
-        return json.dumps(self.cache_to_dict(), ensure_ascii=False, indent=4)
+        return json.dumps(self.cache_to_dict(), ensure_ascii=False)
 
     def save_to_json(self):
         # Записываем данные в файл с отступами для читаемости
@@ -1701,6 +1701,7 @@ def runtime_management():
   set <domain> <params> - установить для домена <domain> стратегию <params>;
       вместо <params> можно указать DIRECT - устанавливать соединение напрямую
   update <domain|url> - принудительно обновить стратегию
+  json - кэш в формате json
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
   summary - список добавленных за этот сеанс доменов
