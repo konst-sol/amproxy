@@ -1124,6 +1124,8 @@ class DomainRegistry:
             json.dump(self.cache_to_dict(), f, ensure_ascii=False, indent=4)
 
     def load_from_json(self):
+        if not self.json_file.exists():
+            return
         with self.json_file.open(encoding='utf-8') as f:
             data = json.load(f)
         for domain, dom_dict in data.items():
