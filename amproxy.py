@@ -665,7 +665,7 @@ class DomainInfo:
             try:
                 # Запускаем ciadpi (не используем run_ciadpi потому что async)
                 proc = await asyncio.create_subprocess_exec(
-                    CIADPI_EXE, '-i', '127.0.0.1', '-p', str(port), *args,
+                    CIADPI_PATH, '-i', '127.0.0.1', '-p', str(port), *args,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL
                 )
@@ -1350,7 +1350,7 @@ def get_free_port():
 
 def run_ciadpi(port, params):
     # запускаем ciadpi и проверяем запустился ли
-    cmd = f'{CIADPI_EXE} -i 127.0.0.1 -p {port} {params}'
+    cmd = f'{CIADPI_PATH} -i 127.0.0.1 -p {port} {params}'
     proc = subprocess.Popen(cmd.split(),
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
@@ -1568,11 +1568,8 @@ def find_ciadpi_exe():
     local_binary_path = app_dir / CIADPI_EXE
     # Проверяем, есть ли бинарник прямо в каталоге с программой
     if local_binary_path.is_file():
-        if os.access(local_binary_path, os.X_OK):
-            # файл существует и является исполнимым
-            CIADPI_PATH = local_binary_path
-            return
-        error(f'{local_binary_path} существует, но не является исполнимым')
+        CIADPI_PATH = local_binary_path
+        return
     # Ищем бинарник в системных каталогах среды окружения ($PATH / %PATH%)
     # shutil.which автоматически учитывает расширения .exe/.cmd на Windows
     system_binary_str = shutil.which(CIADPI_EXE)
@@ -1581,7 +1578,7 @@ def find_ciadpi_exe():
     # Если нигде не нашли, CIADPI_PATH остается пустой строкой
 
 def init_app(proxy_mode=True):
-    global APP_DIR, CACHE_DIR, LOG_DIR, USER_RULES_FILE, STRATEGIES_FILE
+    global APP_DIR, CACHE_DIR, LOG_DIR, CIADPI_PATH, USER_RULES_FILE, STRATEGIES_FILE
     # определяем служебный каталог
     if APP_DIR:
         # определен в конфиге или ком. строке
@@ -1611,10 +1608,17 @@ def init_app(proxy_mode=True):
     # Проверка необходимых файлов
     find_ciadpi_exe()
     if CIADPI_PATH:
-        debug(f'путь к ciadpi: {CIADPI_PATH}')
+        CIADPI_PATH = CIADPI_PATH.resolve()
+        if not CIADPI_PATH.is_file():
+            error(f'{CIADPI_PATH} существует, но не является регулярным файлом')
+            sys.exit(1)
+        if not os.access(CIADPI_PATH, os.X_OK):
+            error(f'{CIADPI_PATH} существует, но не является исполнимым')
+            sys.exit(1)
     else:
         error(f'Не найден бинарник ByDPI: {CIADPI_EXE}')
         sys.exit(1)
+    info(f'путь к ciadpi: {CIADPI_PATH}')
     if not STRATEGIES_FILE.exists():
         error(f'Не найден файл стратегий: {STRATEGIES_FILE}')
         sys.exit(1)
