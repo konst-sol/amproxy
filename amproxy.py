@@ -1054,7 +1054,12 @@ class DomainRegistry:
                 s = s.split('#')[0] # убираем комментарии
                 s = s.strip()
                 if not s: continue
-                domain, params = s.split(maxsplit=1)
+                try:
+                    domain, params = s.split(maxsplit=1)
+                except ValueError:
+                    error(f'ошибка в файле {USER_RULES_FILE}: '
+                          f'строка {lineno}: {s}')
+                    continue
                 if params in ('DIRECT', 'BLOCK'):
                     dom = DomainInfo(domain, params, user_config=True)
                 elif params.startswith('EXTERN'):
