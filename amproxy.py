@@ -739,8 +739,7 @@ class DomainInfo:
                     pass
         return None
 
-    async def _scan_page(self, content, target_url, proxies,
-                         max_duration=SCAN_PAGE_TIMEOUT):
+    async def _scan_page(self, content, target_url, proxies):
         # Парсим content, находим ссылки и проверяем их на доступность
         # Возвращает список url
         soup = BeautifulSoup(content, 'html.parser')
@@ -789,12 +788,12 @@ class DomainInfo:
         tasks = [self._check_blocked(url, proxies, semaphore) for url in urls]
         try:
             # лимит на всю проверку
-            for coro in asyncio.as_completed(tasks, timeout=max_duration):
+            for coro in asyncio.as_completed(tasks, timeout=SCAN_PAGE_TIMEOUT):
                 result = await coro
                 if result:
                     found_results.append(result)
         except asyncio.TimeoutError:
-            debug(f'лимит {max_duration} сек исчерпан. Возвращаем найденное')
+            debug(f'лимит {SCAN_PAGE_TIMEOUT} сек исчерпан. Возвращаем найденное')
 
         debug(f'найдено {len(found_results)} заблокированных ресурсов')
         return found_results
@@ -1585,6 +1584,7 @@ def init_app(proxy_mode=True):
         APP_DIR = Path(APP_DIR)
     else:
         APP_DIR = get_app_dir()
+    APP_DIR = APP_DIR.resolve()
     info(f'Служебный каталог: {APP_DIR}')
     APP_DIR.mkdir(parents=True, exist_ok=True)
     read_config_file()
@@ -1680,14 +1680,15 @@ def runtime_management():
             else:
                 domain, params = splited[1:]
                 dom = domain_registry.get_domain_info(domain)
-                if params.startswith('-'):
-                    dom._update('PROXY', params)
-                    send(f'Для домена {domain} установлена стратегия {params}')
-                elif params == 'DIRECT':
-                    dom._update('DIRECT')
-                    send(f'Для домена {domain} установлена стратегия {params}')
-                else:
-                    send(f'ERROR: {params} -- не параметры')
+                with dom.lock:
+                    if params.startswith('-'):
+                        dom._update('PROXY', params)
+                        send(f'Для домена {domain} установлена стратегия {params}')
+                    elif params == 'DIRECT':
+                        dom._update('DIRECT')
+                        send(f'Для домена {domain} установлена стратегия {params}')
+                    else:
+                        send(f'ERROR: {params} -- не параметры')
         elif data.startswith('update '):
             url = data[7:]
             if not url.startswith(('http://', 'https://')):
