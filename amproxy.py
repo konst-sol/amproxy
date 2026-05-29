@@ -402,7 +402,7 @@ def read_config_file():
 def add_new_section(isp_name):
     # Дописывает новую секцию в конец конфиг-файла (для watch_network)
     config = ConfigParser()
-    config.read((CONFIG_PATH), encoding='utf-8')
+    config.read(CONFIG_PATH, encoding='utf-8')
     if isp_name in config:
         return
     debug(f'Новый провайдер. Добавляем секцию [{isp_name}] в конфиг-файл')
