@@ -62,6 +62,9 @@ USER_RULES_FILE = '' # 'user-rules.txt' пользовательские стр�
 JSON_CACHE_FILE = 'cache.json' # Файл кэша в формате JSON
 BACKUP_FILES = 0 # 0/1 сохранять ли резервные копии файлов кэша (debug)
 DYNAMIC_CONFIG = 1 # 0/1 Динамическое изменение настроек/стратегий при смене провайдера
+# правила для FAILED - что делать, если ресурс заблокирован, а стратегия не найдена
+FAILED_RULE = 'DIRECT' # либо EXTERN - в этом случае обязательно указать: ↓
+DEFAULT_EXTERN_PROXY = '' # прокси для FAILED_RULE. Например, "socks5://localhost"
 # Таймауты
 DIRECT_TEST_TIMEOUT = 5. # таймаут для проверки доступности (секунды)
 PROXY_TEST_TIMEOUT = 5. # таймаут для поиска стратегии
@@ -71,7 +74,7 @@ NUMBER_OF_TESTS = 2 # количество проверок прямой дос�
 # время устаревания разных статусов в часах:
 DIRECT_TTL = 7*24. # прямое подключение
 PROXY_TTL = 7*24. # подключение через ciadpi
-FAILED_TTL = 8. # прямое подключение если стратегия для ciadpi не найдена
+FAILED_TTL = 8. # стратегия для ciadpi не найдена
 LOG_LEVEL = 'INFO' # уровень логирования (CRITICAL/ERROR/INFO/DEBUG)
 LOG_DIR = '' # каталог для сохранения логов (~/.amproxy/log) (объект Path)
 LOG_FILE = APP_NAME+'.log' # если пустая строка - не логировать в файл
@@ -807,7 +810,7 @@ class DomainInfo:
         for p in params_list:
             tsk = asyncio.create_task(self._test_params(url, p, semaphore, found_event))
             tasks.append(tsk)
-            await asyncio.sleep(0.2) # небольшое преимущество первым стратегиям
+            #await asyncio.sleep(0.2) # небольшое преимущество первым стратегиям
 
         result = None
         try:
@@ -912,13 +915,16 @@ class DomainInfo:
                 if host in tested_hosts:
                     continue
                 if dom is self:
+                    if FAILED_RULE == 'EXTERN':
+                        self._update('FAILED')
+                        tested_hosts.append(host)
+                        continue
                     # перепроверяем стратегию на ссылках из content
                     debug(f'перепроверка: {tested_url}')
                     ret = self._test_strategies(tested_url, update=False)
                     if ret == 'DIRECT':
                         debug('стратегия для обхода 16к не найдена. '
                               f'для {host} будут недоступны большие файлы')
-                        continue
                     else:
                         if ret[0] == params:
                             continue
@@ -960,7 +966,8 @@ class DomainInfo:
         info['user_config'] = self.user_config
         if self.count:
             info['count'] = self.count
-        #self.urls = set()
+        if self.urls:
+            info['urls'] = '\n'.join([''] + ['  ' + u for u in self.urls])
         return info
 
 # </DOMAININFO>
@@ -1086,6 +1093,7 @@ class DomainRegistry:
             if JSON_CACHE_FILE.exists():
                 # Создаем резервную копию
                 # .with_suffix добавит/заменит расширение
+                fn = JSON_CACHE_FILE
                 bak_file = fn.with_suffix(fn.suffix + '.bak')
                 fn.replace(bak_file)
         self.save_to_json()
@@ -1120,7 +1128,7 @@ class DomainRegistry:
         return prepared_data
 
     def get_json(self):
-        return json.dumps(self.cache_to_dict(), ensure_ascii=False)
+        return json.dumps(self.cache_to_dict(), ensure_ascii=False, indent=4)
 
     def save_to_json(self):
         # Записываем данные в файл с отступами для читаемости
@@ -1247,7 +1255,7 @@ def get_current_ip():
                     ip = response.json().get('ip')
                 try:
                     socket.inet_pton(socket.AF_INET, ip) # проверка корректности ip
-                except:
+                except Exception:
                     continue
                 return ip
         except Exception as err:
@@ -1490,6 +1498,9 @@ def handle_client(client_socket, address):
             dom.increment_count()
             params = dom.run_test(url) # получаем стратегию или DIRECT
 
+        if dom.status == 'FAILED':
+            params = FAILED_RULE
+
         # Подключение к серверу
         info(f'Подключение: {host}:{port} '
              f'[{"HTTPS" if is_https else "HTTP"}] '
@@ -1498,8 +1509,12 @@ def handle_client(client_socket, address):
         if params == 'DIRECT':
             pass
         elif params == 'EXTERN':
-            debug(f'{host}: подключение к внешнему прокси: {dom.extern_proxy}')
-            set_proxy_from_url(remote_socket, dom.extern_proxy)
+            extern_proxy = dom.extern_proxy or DEFAULT_EXTERN_PROXY
+            if not extern_proxy:
+                error('не установлен дефолтный внешний прокси')
+            else:
+                debug(f'{host}: подключение к внешнему прокси: {extern_proxy}')
+                set_proxy_from_url(remote_socket, extern_proxy)
         else:
             # определяем порт ciadpi
             target_port = get_params_to_port(params)
@@ -1650,68 +1665,83 @@ def runtime_management():
         conn, addr = sock.accept()
         data = conn.recv(1024).decode('utf-8').strip()
         debug(f'получена команда управления: {data}')
-        if data == 'ciadpi':
+        cmd, _, arg = data.partition(' ')
+        arg = arg.strip()
+        if cmd == 'ciadpi':
             send(info_ciadpi_status())
-        elif data == 'stats':
+        elif cmd == 'stats':
             send(info_params_stat())
-        elif data == 'summary':
+        elif cmd == 'summary':
             send(info_summary())
-        elif data == 'uptime':
+        elif cmd == 'uptime':
             send(uptime())
-        elif data == 'pid':
+        elif cmd == 'pid':
             send(f'PID: {os.getpid()}')
-        elif data == 'settings':
+        elif cmd == 'settings':
             send('\n'.join(f'{k} = {globals()[k]}' for k in settings_list))
-        elif data.startswith('info '):
-            domain = data[5:].strip()
-            dom = domain_registry.get(domain)
-            if dom:
-                send('\n'.join(f'{k}: {v}' for k, v in dom.info().items()))
+        elif cmd == 'info':
+            if not arg:
+                send('ERROR: использование: info <domain>')
             else:
-                send(f'Домен {domain} не зарегистрирован')
-        elif data.startswith('del '):
-            domain = data[4:].strip()
-            if domain_registry.del_domain_info(domain):
-                send(f'Домен {domain} удален из кэша')
+                dom = domain_registry.get(arg)
+                if dom:
+                    dom_info = dom.info()
+                    max_len = max(len(k) for k in dom_info)
+                    send('\n'.join(f'{k:<{max_len}}: {v}'
+                                   for k, v in dom_info.items()))
+                else:
+                    send(f'Домен {arg} не зарегистрирован')
+        elif cmd == 'del':
+            if not arg:
+                send('ERROR: использование: del <domain>')
             else:
-                send(f'Домен {domain} не зарегистрирован')
-        elif data.startswith('search '):
-            pat = data[7:].strip()
-            send('\n'.join(domain_registry.search(pat)))
-        elif data.startswith('set '):
-            splited = data.split(maxsplit=2)
-            if len(splited) != 3:
+                if domain_registry.del_domain_info(arg):
+                    send(f'Домен {arg} удален из кэша')
+                else:
+                    send(f'Домен {arg} не зарегистрирован')
+        elif cmd == 'search':
+            send('\n'.join(domain_registry.search(arg)))
+        elif cmd == 'set':
+            splited = arg.split(maxsplit=1)
+            if len(splited) != 2:
                 send('ERROR: использование: set <domain> <params>')
             else:
-                domain, params = splited[1:]
+                domain, params = splited
                 dom = domain_registry.get_domain_info(domain)
                 with dom.lock:
                     if params.startswith('-'):
                         dom._update('PROXY', params)
                         send(f'Для домена {domain} установлена стратегия {params}')
-                    elif params == 'DIRECT':
-                        dom._update('DIRECT')
+                    elif params in ('DIRECT', 'FAILED'):
+                        dom._update(params)
                         send(f'Для домена {domain} установлена стратегия {params}')
                     else:
                         send(f'ERROR: {params} -- не параметры')
-        elif data.startswith('update '):
-            url = data[7:]
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://'+url
-            parsed_url = urlparse(url)
-            domain = parsed_url.hostname
-            dom = domain_registry.get_domain_info(domain)
-            params = dom.run_test(url, force=True)
-            send(f'Найдена стратегия для {domain}: {params}')
-        elif data == 'json':
+        elif cmd == 'update':
+            if not arg:
+                send('ERROR: использование: update <domain|url>')
+            else:
+                url = arg
+                if not url.startswith(('http://', 'https://')):
+                    url = 'https://'+url
+                parsed_url = urlparse(url)
+                domain = parsed_url.hostname
+                dom = domain_registry.get_domain_info(domain)
+                params = dom.run_test(url, force=True)
+                send(f'Найдена стратегия для {domain}: {params}')
+        elif cmd == 'json':
             send(domain_registry.get_json())
-        elif data == 'help':
+        elif cmd == 'commands':
+            send('help commands search info del set update json '
+                 'ciadpi stats summary settings uptime pid')
+        elif cmd == 'help':
             send('''Доступные команды:
   search <str> - вывод всех доменов в имени которых есть подстрока <str>
   info <domain> - информация о домене
   del <domain> - удаление домена из кэша
   set <domain> <params> - установить для домена <domain> стратегию <params>;
-      вместо <params> можно указать DIRECT - устанавливать соединение напрямую
+      вместо <params> можно указать DIRECT - устанавливать соединение напрямую,
+      либо FAILED - пометить домен как недоступный
   update <domain|url> - принудительно обновить стратегию
   json - кэш в формате json
   ciadpi - статус зарегистрированных процессов ciadpi
@@ -1763,7 +1793,6 @@ def start_proxy():
             threading.Thread(target=handle_client, daemon=True,
                              args=(client_sock,addr)).start()
     except KeyboardInterrupt:
-        # нужно? (Используем root-логгер или прямой print, так как потоки могут закрываться)
         info('Shutting down...')
         sys.exit(0)
     finally:
