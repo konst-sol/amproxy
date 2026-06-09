@@ -122,6 +122,8 @@ log_manager = None # объект класса LogManager
 domain_registry = None # объект класса DomainRegistry {domain: DomainInfo}
 # Функции вывода в лог. Переопределяются в LogManager
 error = info = debug = lambda x: None
+# Все соединения напрямую
+direct_mode = False
 # </ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ>
 
 # <LOGGING>
@@ -831,6 +833,8 @@ class DomainInfo:
 
     # *Основная функция*
     def run_test(self, target_url, related=False, force=False):
+        if direct_mode:
+            return 'DIRECT'
         # Проверка доступности и подбор параметров, если напрямую не вышло.
         # Возвращает стратегию или 'DIRECT'
         # Если related == True - проверяется ссылка из тестируемой страницы
@@ -962,7 +966,7 @@ class DomainInfo:
         if self.params:
             info['params'] = self.params
         if self.history_params:
-            info['history_params'] = '|'.join(self.history_params)
+            info['history_params'] = '\n'.join([''] + ['  ' + p for p in self.history_params])
         info['user_config'] = self.user_config
         if self.count:
             info['count'] = self.count
@@ -1653,6 +1657,7 @@ def init_app(proxy_mode=True):
 
 def runtime_management():
     # управление прокси-сервером во время выполнения
+    global direct_mode
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('127.0.0.1', CONTROL_PORT))
@@ -1728,11 +1733,23 @@ def runtime_management():
                 domain = parsed_url.hostname
                 dom = domain_registry.get_domain_info(domain)
                 params = dom.run_test(url, force=True)
-                send(f'Найдена стратегия для {domain}: {params}')
+                if dom.status == 'FAILED':
+                    send(f'Для {domain} стратегия не найдена')
+                else:
+                    send(f'Найдена стратегия для {domain}: {params}')
+        elif cmd == 'direct':
+            if arg == 'on':
+                direct_mode = True
+                send('DIRECT MODE ON')
+            elif arg == 'off':
+                direct_mode = False
+                send('DIRECT MODE OFF')
+            else:
+                send('ERROR: использование: direct on/off')
         elif cmd == 'json':
             send(domain_registry.get_json())
         elif cmd == 'commands':
-            send('help commands search info del set update json '
+            send('help commands search info del set update direct json '
                  'ciadpi stats summary settings uptime pid')
         elif cmd == 'help':
             send('''Доступные команды:
@@ -1743,6 +1760,7 @@ def runtime_management():
       вместо <params> можно указать DIRECT - устанавливать соединение напрямую,
       либо FAILED - пометить домен как недоступный
   update <domain|url> - принудительно обновить стратегию
+  direct <on|off> - устанавливать ВСЕ соединения напрямую
   json - кэш в формате json
   ciadpi - статус зарегистрированных процессов ciadpi
   stats - статистика использования стратегий
