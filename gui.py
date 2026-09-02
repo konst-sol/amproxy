@@ -43,7 +43,7 @@ else:
     sys.exit('Неподдерживаемая OS')
 
 PSIPHON_PATH = PSIPHON_DIR / PSIPHON_EXE
-PSIPHON_CONFIG = PSIPHON_DIR / 'psiphon.config'
+PSIPHON_CONFIG_FILE = PSIPHON_DIR / 'psiphon.config'
 PSIPHON_ETAG_FILE = PSIPHON_DIR / f"{PSIPHON_EXE}.etag"
 
 
@@ -354,7 +354,7 @@ class Psiphon(Server):
             self.log_text.tag_config(tag_name, foreground=color)
 
     def start(self):
-        with open(PSIPHON_CONFIG) as file:
+        with open(PSIPHON_CONFIG_FILE) as file:
             data = json.load(file)
         if self.app.random_port.get():
             self.http_port = get_free_port()
@@ -368,7 +368,7 @@ class Psiphon(Server):
         if region != 'ANY':
             data['EgressRegion'] = region
         temp_file = tempfile.NamedTemporaryFile(
-            mode='w', prefix='psiphon', suffix=PSIPHON_CONFIG.suffix, delete=False)
+            mode='w', prefix='psiphon', suffix=PSIPHON_CONFIG_FILE.suffix, delete=False)
         self.config = Path(temp_file.name)
         json.dump(data, temp_file)
 
@@ -415,7 +415,7 @@ class Psiphon(Server):
             formatted_message = f'[{local_time}] [{notice_type}] {message}'
 
             # обновление регионов сервера
-            if notice_type == 'AvailableEgressRegions':
+            if notice_type == 'AvailableEgressRegions' and message['regions']:
                 Psiphon.regions = ['ANY'] + message['regions']
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -432,7 +432,11 @@ class Psiphon(Server):
 
     def check_and_update(self):
         # Создаем подкаталог PSIPHON_DIR, если его еще нет
-        #PSIPHON_DIR.mkdir(parents=True, exist_ok=True)
+        PSIPHON_DIR.mkdir(parents=True, exist_ok=True)
+        # Создаем дефолтный конфиг
+        if not PSIPHON_CONFIG_FILE.exists():
+            with open(PSIPHON_CONFIG_FILE, 'w') as f:
+                f.write(PSIPHON_CONFIG)
         # Заголовки http-запроса
         headers = {}
         # Проверяем наличие файла и сохраненного ETag
@@ -791,8 +795,36 @@ class App(tk.Tk):
                 self.psiphon_regions.set(section['selected region'])
 
 
+#
+PSIPHON_CONFIG = '''{
+
+    "ObfuscatedServerListRootURLs": [
+        {"URL": "aHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tL3BzaXBob24vd2ViL21qcjQtcDIzci1wdXdsL29zbA=="},
+        {"URL": "aHR0cHM6Ly9kaWFnNXJvemk0bTR3LmNsb3VkZnJvbnQubmV0L3dlYi9tanI0LXAyM3ItcHV3bC9vc2w="}
+    ],
+    "Authorizations": [],
+    "DeviceRegion": "RU",
+    "EmitDiagnosticNetworkParameters": true,
+    "EgressRegion": "",
+    "EmitDiagnosticNotices": true,
+    "EmitServerAlerts": true,
+    "LocalHttpProxyPort": 8080,
+    "LocalSocksProxyPort": 1080,
+    "NetworkID": "949F2E962ED7A9165B81E977A3B4758B",
+    "PropagationChannelId": "92AACC5BABE0944C",
+    "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
+    "ServerEntrySignaturePublicKey": "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=",
+    "SponsorId": "1BC527D3D09985CF",
+    "UseIndistinguishableTLS": true,
+    "StderrVerbose": true
+}
+'''
+
+#
 if __name__ == '__main__':
     app = App()
     app.mainloop()
 
 #
+
+
