@@ -29,7 +29,7 @@ AMPROXY_PATH = APP_DIR / 'amproxy.py'
 AMPROXY_CONFIG = APP_DIR / 'amproxy.ini'
 
 HISTORY_FILE = APP_DIR / 'history.txt'
-
+USER_RULES_FILE = APP_DIR / 'user-rules.txt' # FIXME: имя файла может быть изменено в конфиге
 
 PSIPHON_DIR = APP_DIR / 'psiphon'
 # Автоматический выбор URL и имени файла в зависимости от ОС
@@ -46,6 +46,7 @@ PSIPHON_PATH = PSIPHON_DIR / PSIPHON_EXE
 PSIPHON_CONFIG_FILE = PSIPHON_DIR / 'psiphon.config'
 PSIPHON_ETAG_FILE = PSIPHON_DIR / f"{PSIPHON_EXE}.etag"
 
+psiphon_log = (PSIPHON_DIR / 'psiphon.log').open('a')
 
 
 class ConfigParser(configparser.ConfigParser):
@@ -271,10 +272,6 @@ class Server(ABC):
             messagebox.showerror('Ошибка запуска', str(e))
 
     def stop(self):
-        if self.config and self.config.exists():
-            # удаляем временный конфиг
-            self.config.unlink()
-
         if self.process:
             self.log_message('--- Останавливаем сервер... ---')
             # Завершаем процесс
@@ -298,6 +295,11 @@ class Server(ABC):
             remaining_output = self.process.stdout.read()
             if remaining_output:
                 self.log_message(remaining_output)
+
+        if self.config and self.config.exists():
+            # удаляем временный конфиг
+            self.config.unlink()
+            self.config = None
 
         self.log_message('--- Процесс сервера завершен ---')
         self.process = None
@@ -373,7 +375,6 @@ class Psiphon(Server):
         json.dump(data, temp_file)
 
         cmd = [PSIPHON_PATH,
-               #'-formatNotices',
                '-dataRootDirectory', PSIPHON_DIR,
                '-config', self.config]
         if self.app.psiphon_host.get() == '0.0.0.0':
@@ -417,6 +418,10 @@ class Psiphon(Server):
             # обновление регионов сервера
             if notice_type == 'AvailableEgressRegions' and message['regions']:
                 Psiphon.regions = ['ANY'] + message['regions']
+
+            # сохранение в лог-файл
+            if notice_type in ('ConnectedServer', 'CandidateServers'):
+                psiphon_log.write(line)
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             #print(line, e)
@@ -499,6 +504,7 @@ class App(tk.Tk):
         self.notebook.pack(fill='both', expand=True)
         self.setup_main_tab()
         self.setup_config_tab()
+        self.setup_user_rules_tab()
         self.setup_control_tab()
         # AMProxy
         self.amproxy = AMProxy(self)
@@ -658,26 +664,6 @@ class App(tk.Tk):
         self.psiphon_autostart = tk.BooleanVar()
         _checkb('Автоматически запускать Psiphon при старте', self.psiphon_autostart)
 
-        # # 4. Labelframe 'Дополнительные настройки AMProxy'
-        # frame = ttk.Labelframe(config_frame, text='Дополнительные настройки AMProxy',
-        #                        padding=10)
-        # frame.pack(padx=15, pady=5, fill='both', expand=True)
-        # # Скроллбар и текстовое поле
-        # scrollbar = ttk.Scrollbar(frame)
-        # scrollbar.pack(side='right', fill='y')
-        # self.text_area = tk.Text(frame, yscrollcommand=scrollbar.set, height=6)
-        # self.text_area.pack(side='left', fill='both', expand=True)
-        # scrollbar.config(command=self.text_area.yview)
-
-        # 5. Кнопки "Применить" и "Сбросить настройки" в самом низу
-        frame = ttk.Frame(config_frame)
-        frame.pack(side='bottom', pady=15)
-        ttk.Button(frame, text='Применить', width=15, command=self.apply_config
-                   ).pack(padx=10, side='left')
-        ttk.Button(frame, text='Сбросить настройки', width=20,
-                   command=self.set_default_config
-                   ).pack(padx=10, side='left')
-
         self.set_default_config()
 
     def set_default_config(self):
@@ -690,6 +676,77 @@ class App(tk.Tk):
         self.psiphon_host.replace('127.0.0.1')
         self.psiphon_http_port.replace('8080')
         self.psiphon_socks5_port.replace('1080')
+
+
+    def setup_user_rules_tab(self):
+        config_tab = ttk.Frame(self.notebook)
+        self.notebook.add(config_tab, text=' User-Rules ')
+        frame = ttk.Frame(config_tab)
+        frame.pack(padx=10, pady=10, expand=True, fill='both')
+        # Настройка сетки внутри Labelframe:
+        # Строка 0 (для текста) растягивается (weight=1),
+        # Строка 1 (для кнопки) — нет (weight=0)
+        frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=0)
+        frame.columnconfigure(0, weight=1)  # Текстовое поле растягивается
+        frame.columnconfigure(1, weight=0)  # Скроллбар не растягивается в ширину
+        # 2. Создаем текстовое поле (Text)
+        self.user_rules_text = tk.Text(frame, wrap=tk.WORD)
+        self.user_rules_text.grid(row=0, column=0, padx=(5, 0), pady=5, sticky='nsew')
+        #
+        self.user_rules_text.bind("<<Modified>>", self.on_user_rules_modified)
+        # 3. Создаем полосу прокрутки (Scrollbar) справа от текста
+        scrollbar = ttk.Scrollbar(frame, orient='vertical',
+                                  command=self.user_rules_text.yview)
+        scrollbar.grid(row=0, column=1, padx=(0, 5), pady=5, sticky='ns')
+        # Связываем текстовое поле со скроллбаром
+        self.user_rules_text.config(yscrollcommand=scrollbar.set)
+        # 4. Создаем кнопку 'Save' внизу
+        # columnspan=2 позволяет кнопке находиться под текстом и скроллбаром сразу
+        # sticky='e' выравнивает кнопку по правому краю
+        self.save_rules_button = ttk.Button(frame, text='Save', state='disabled',
+                                            command=self.save_user_rules)
+        self.save_rules_button.grid(row=1, column=0, columnspan=2, padx=5, pady=5,
+                                    sticky='e')
+        # Загружаем файл
+        if USER_RULES_FILE.exists():
+            try:
+                with USER_RULES_FILE.open('r', encoding='utf-8') as file:
+                    content = file.read()
+                    self.user_rules_text.insert('1.0', content)
+            except Exception as e:
+                messagebox.showerror(
+                    'Ошибка', f'Не удалось прочитать файл:\n{e}'
+                )
+
+        # ВАЖНО: Сбрасываем флаг модификации после первичной загрузки текста,
+        # чтобы кнопка Save оставалась выключенной при старте.
+        self.user_rules_text.edit_modified(False)
+
+    def save_user_rules(self):
+        # tk.Text всегда автоматически добавляет невидимый символ
+        # переноса строки (\n) в самый конец текста, чтобы пользователь
+        # всегда мог перевести курсор на новую пустую строку
+        content = self.user_rules_text.get('1.0', 'end-1c') # отсекаем последний символ
+        try:
+            with USER_RULES_FILE.open('w', encoding='utf-8') as file:
+                file.write(content)
+            # Сбрасываем флаг модификации. Это автоматически НЕ вызовет событие,
+            # поэтому мы вручную отключаем кнопку после успешного сохранения.
+            self.user_rules_text.edit_modified(False)
+            self.save_rules_button.config(state='disabled')
+            messagebox.showinfo('Сохранение',
+                                f'Файл успешно сохранен в:\n{USER_RULES_FILE}')
+        except Exception as e:
+            messagebox.showerror('Ошибка', f'Не удалось сохранить файл:\n{e}')
+
+    def on_user_rules_modified(self, event):
+        # Срабатывает при любом изменении текста в текстовом поле.
+        # Проверяем, действительно ли поле было изменено
+        if self.user_rules_text.edit_modified():
+            # Включаем кнопку Save
+            self.save_rules_button.config(state='normal')
+
 
     def run_server(self):
         if self.amproxy.process is None:
@@ -821,10 +878,9 @@ PSIPHON_CONFIG = '''{
 '''
 
 #
-if __name__ == '__main__':
-    app = App()
-    app.mainloop()
-
+app = App()
+app.mainloop()
+psiphon_log.close()
 #
 
 
