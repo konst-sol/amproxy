@@ -48,7 +48,6 @@ PSIPHON_ETAG_FILE = PSIPHON_DIR / f"{PSIPHON_EXE}.etag"
 
 psiphon_log = (PSIPHON_DIR / 'psiphon.log').open('a')
 
-
 class ConfigParser(configparser.ConfigParser):
     def __init__(self):
         super().__init__(
@@ -403,9 +402,11 @@ class Psiphon(Server):
                 # Если вызвать .astimezone() без аргументов,
                 # Python автоматически возьмет системную таймзону
                 local_dt = dt.astimezone()
-                local_time = local_dt.strftime("%H:%M:%S")
+                local_time = local_dt.strftime('%H:%M:%S')
+                local_datetime = local_dt.strftime('%d.%m.%Y %H:%M:%S')
             else:
-                local_time = time.strftime("%H:%M:%S")
+                local_time = time.strftime('%H:%M:%S')
+                local_datetime = time.strftime('%d.%m.%Y %H:%M:%S')
             # Формируем читаемый текст в зависимости от структуры поля data
             if 'message' in data_field:
                 message = data_field['message']
@@ -420,8 +421,14 @@ class Psiphon(Server):
                 Psiphon.regions = ['ANY'] + message['regions']
 
             # сохранение в лог-файл
-            if notice_type in ('ConnectedServer', 'CandidateServers'):
+            if notice_type in ('ConnectedServer', 'ConnectedServerRegion',
+                               'CandidateServers'):
                 psiphon_log.write(line)
+            # Статус
+            if notice_type == 'ConnectedServerRegion':
+                self.app.psiphon_country.set(data_field['serverRegion'])
+                self.app.psiphon_conn_time.set(local_datetime)
+
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             #print(line, e)
@@ -491,6 +498,10 @@ class Psiphon(Server):
         except requests.exceptions.RequestException as e:
             self.log_raw_message(f"Ошибка при проверке обновлений: {e}")
 
+    def read_output_loop(self):
+        super().read_output_loop()
+        self.app.psiphon_country.set('')
+        self.app.psiphon_conn_time.set('')
 
 
 class App(tk.Tk):
@@ -498,6 +509,16 @@ class App(tk.Tk):
         super().__init__()
         self.title('AMProxy Runner')
         self.geometry('800x600')
+
+        if sys.platform == 'linux':
+            # Применяет увеличенную ширину скроллбаров для всего приложения
+            style = ttk.Style()
+            # Тема clam лучше всего масштабируется в Ubuntu
+            #style.theme_use('clam')
+            # Увеличиваем ширину скроллбара (по умолчанию обычно 14)
+            # Параметр arrowsize в теме clam регулирует общую толщину полосы
+            style.configure('TScrollbar', arrowsize=20)
+            style.configure("TCombobox", arrowsize=20)
 
         # Панель вкладок
         self.notebook = ttk.Notebook(self)
@@ -533,6 +554,31 @@ class App(tk.Tk):
         ttk.Button(
             main_tab, text='Run', command=self.run_server
         ).pack(pady=20)
+
+        # 1. Создаем динамические переменные для хранения данных
+        self.psiphon_country = tk.StringVar(value='')
+        self.psiphon_conn_time = tk.StringVar(value='Не подключено')
+
+        # 2. Создаем ttk.Labelframe
+        status_frame = ttk.Labelframe(main_tab, text='Статус Psiphon', padding=10)
+        status_frame.pack(fill='x', padx=15, pady=15)
+
+        # 3. Добавляем строки внутрь фрейма.
+        # Используем textvariable вместо text для динамического обновления.
+        country_label = ttk.Label(status_frame, text='Регион: ')
+        country_label.grid(row=0, column=0, sticky='w', pady=2)
+
+        country_value = ttk.Label(status_frame, textvariable=self.psiphon_country) #, font=("Arial", 10, "bold"))
+        country_value.grid(row=0, column=1, sticky='w', pady=2)
+
+        time_label = ttk.Label(status_frame, text='Время: ')
+        time_label.grid(row=1, column=0, sticky='w', pady=2)
+
+        time_value = ttk.Label(status_frame, textvariable=self.psiphon_conn_time)
+        time_value.grid(row=1, column=1, sticky='w', pady=2)
+
+
+
 
     def setup_control_tab(self):
         control_tab = ttk.Frame(self.notebook)
@@ -618,8 +664,7 @@ class App(tk.Tk):
         self.notebook.add(config_tab, text=' Config ')
         config_frame = ttk.Frame(config_tab)
         config_frame.pack(padx=10, pady=10, expand=True, fill='both')
-
-        # 1. Верхний информационный Label
+        # Верхний информационный Label
         ttk.Label(
             config_frame, text=(
                 'Настройки AMProxy\n'
@@ -627,8 +672,7 @@ class App(tk.Tk):
                 '• Для возвращения к настройкам по умолчанию нажмите «Сбросить настройки»'
             ), justify='left',
         ).pack(padx=15, pady=15, fill='x')
-
-        # 2. Labelframe 'Настройки AMProxy'
+        # Labelframe 'Настройки AMProxy'
         frame = ttk.Labelframe(config_frame, text='Настройки AMProxy', padding=10)
         frame.pack(padx=15, pady=5, fill='x')
         i = 0
@@ -640,8 +684,7 @@ class App(tk.Tk):
         i += 1
         self.amproxy_autostart = tk.BooleanVar()
         _checkb('Автоматически запускать AMProxy при старте', self.amproxy_autostart)
-
-        # 3. Labelframe 'Настройки Psiphon'
+        # Labelframe 'Настройки Psiphon'
         frame = ttk.Labelframe(config_frame, text='Настройки Psiphon', padding=10)
         frame.pack(padx=15, pady=5, fill='x')
         i = 0
@@ -663,6 +706,14 @@ class App(tk.Tk):
         i += 1
         self.psiphon_autostart = tk.BooleanVar()
         _checkb('Автоматически запускать Psiphon при старте', self.psiphon_autostart)
+        # Кнопки "Применить" и "Сбросить настройки" в самом низу
+        frame = ttk.Frame(config_frame)
+        frame.pack(side='bottom', pady=15)
+        ttk.Button(frame, text='Применить', width=15, command=self.apply_config
+                   ).pack(padx=10, side='left')
+        ttk.Button(frame, text='Сбросить настройки', width=20,
+                   command=self.set_default_config
+                   ).pack(padx=10, side='left')
 
         self.set_default_config()
 
@@ -708,6 +759,7 @@ class App(tk.Tk):
                                             command=self.save_user_rules)
         self.save_rules_button.grid(row=1, column=0, columnspan=2, padx=5, pady=5,
                                     sticky='e')
+        self.user_rules_text.bind('<Control-s>', self.save_user_rules)
         # Загружаем файл
         if USER_RULES_FILE.exists():
             try:
@@ -723,7 +775,7 @@ class App(tk.Tk):
         # чтобы кнопка Save оставалась выключенной при старте.
         self.user_rules_text.edit_modified(False)
 
-    def save_user_rules(self):
+    def save_user_rules(self, event=None):
         # tk.Text всегда автоматически добавляет невидимый символ
         # переноса строки (\n) в самый конец текста, чтобы пользователь
         # всегда мог перевести курсор на новую пустую строку
@@ -735,8 +787,8 @@ class App(tk.Tk):
             # поэтому мы вручную отключаем кнопку после успешного сохранения.
             self.user_rules_text.edit_modified(False)
             self.save_rules_button.config(state='disabled')
-            messagebox.showinfo('Сохранение',
-                                f'Файл успешно сохранен в:\n{USER_RULES_FILE}')
+            # messagebox.showinfo('Сохранение',
+            #                     f'Файл успешно сохранен в:\n{USER_RULES_FILE}')
         except Exception as e:
             messagebox.showerror('Ошибка', f'Не удалось сохранить файл:\n{e}')
 
