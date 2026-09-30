@@ -428,6 +428,8 @@ class Psiphon(Server):
             if notice_type == 'ConnectedServerRegion':
                 self.app.psiphon_country.set(data_field['serverRegion'])
                 self.app.psiphon_conn_time.set(local_datetime)
+            if notice_type == 'ConnectedServer':
+                self.app.psiphon_protocol.set(data_field['protocol'])
 
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -502,6 +504,7 @@ class Psiphon(Server):
         super().read_output_loop()
         self.app.psiphon_country.set('')
         self.app.psiphon_conn_time.set('')
+        self.app.psiphon_protocol.set('')
 
 
 class App(tk.Tk):
@@ -558,6 +561,7 @@ class App(tk.Tk):
         # 1. Создаем динамические переменные для хранения данных
         self.psiphon_country = tk.StringVar(value='')
         self.psiphon_conn_time = tk.StringVar(value='Не подключено')
+        self.psiphon_protocol = tk.StringVar(value='')
 
         # 2. Создаем ttk.Labelframe
         status_frame = ttk.Labelframe(main_tab, text='Статус Psiphon', padding=10)
@@ -567,15 +571,18 @@ class App(tk.Tk):
         # Используем textvariable вместо text для динамического обновления.
         country_label = ttk.Label(status_frame, text='Регион: ')
         country_label.grid(row=0, column=0, sticky='w', pady=2)
-
         country_value = ttk.Label(status_frame, textvariable=self.psiphon_country) #, font=("Arial", 10, "bold"))
         country_value.grid(row=0, column=1, sticky='w', pady=2)
 
         time_label = ttk.Label(status_frame, text='Время: ')
         time_label.grid(row=1, column=0, sticky='w', pady=2)
-
         time_value = ttk.Label(status_frame, textvariable=self.psiphon_conn_time)
         time_value.grid(row=1, column=1, sticky='w', pady=2)
+
+        protocol_label = ttk.Label(status_frame, text='Протокол: ')
+        protocol_label.grid(row=2, column=0, sticky='w', pady=2)
+        protocol_value = ttk.Label(status_frame, textvariable=self.psiphon_protocol)
+        protocol_value.grid(row=2, column=1, sticky='w', pady=2)
 
 
 
@@ -745,7 +752,16 @@ class App(tk.Tk):
         self.user_rules_text = tk.Text(frame, wrap=tk.WORD)
         self.user_rules_text.grid(row=0, column=0, padx=(5, 0), pady=5, sticky='nsew')
         #
-        self.user_rules_text.bind("<<Modified>>", self.on_user_rules_modified)
+        self.user_rules_text.bind('<<Modified>>', self.on_user_rules_modified)
+        # Подсветка синтаксиса
+        self.user_rules_text.bind('<KeyPress>', self.on_user_rules_key_press)
+        # Для клавиш удаления (Backspace, Delete) оставляем KeyRelease,
+        # чтобы перерасчет шел после того, как символ уже исчез
+        self.user_rules_text.bind(
+            '<KeyRelease>', lambda e:
+            self.user_rules_highlight_line(self.user_rules_text.index('insert'))
+            #if e.keysym in ('BackSpace', 'Delete') else None
+        )
         # 3. Создаем полосу прокрутки (Scrollbar) справа от текста
         scrollbar = ttk.Scrollbar(frame, orient='vertical',
                                   command=self.user_rules_text.yview)
@@ -760,16 +776,21 @@ class App(tk.Tk):
         self.save_rules_button.grid(row=1, column=0, columnspan=2, padx=5, pady=5,
                                     sticky='e')
         self.user_rules_text.bind('<Control-s>', self.save_user_rules)
+        # Подсветка синтаксиса
+        self.user_rules_text.tag_config('comment', foreground='red')
+        self.user_rules_text.tag_config('domain', foreground='blue')
+        self.user_rules_text.tag_config('keyword', foreground='green')
         # Загружаем файл
         if USER_RULES_FILE.exists():
             try:
                 with USER_RULES_FILE.open('r', encoding='utf-8') as file:
-                    content = file.read()
-                    self.user_rules_text.insert('1.0', content)
+                    idx = 1
+                    for line in file:
+                        self.user_rules_text.insert('end', line)
+                        self.user_rules_highlight_line(f'{idx}.0')
+                        idx += 1
             except Exception as e:
-                messagebox.showerror(
-                    'Ошибка', f'Не удалось прочитать файл:\n{e}'
-                )
+                messagebox.showerror('Ошибка', f'Не удалось прочитать файл:\n{e}')
 
         # ВАЖНО: Сбрасываем флаг модификации после первичной загрузки текста,
         # чтобы кнопка Save оставалась выключенной при старте.
@@ -798,6 +819,50 @@ class App(tk.Tk):
         if self.user_rules_text.edit_modified():
             # Включаем кнопку Save
             self.save_rules_button.config(state='normal')
+
+    def on_user_rules_key_press(self, event):
+        # Проверяем, что нажата клавиша, которая вводит видимый символ
+        if event.char and event.char.isprintable():
+            # Получаем текущую позицию курсора
+            insert_idx = self.user_rules_text.index('insert')
+            # Сами вставляем символ в текстовое поле
+            self.user_rules_text.insert(insert_idx, event.char)
+            # Сразу после вставки проверяем текущую строку
+            self.user_rules_highlight_line(insert_idx)
+            # Блокируем стандартную вставку tkinter, чтобы символ не дублировался
+            return 'break'
+
+    def user_rules_highlight_line(self, current_idx):
+        # Границы строки на основе индекса, переданного из функции вставки
+        start_line = self.user_rules_text.index(f'{current_idx} linestart')
+        end_line = self.user_rules_text.index(f'{current_idx} lineend')
+        # Очищаем старые теги в строке
+        self.user_rules_text.tag_remove('comment', start_line, end_line)
+        self.user_rules_text.tag_remove('domain', start_line, end_line)
+        self.user_rules_text.tag_remove('keyword', start_line, end_line)
+        line_content = self.user_rules_text.get(start_line, end_line)
+        # Комментарий
+        if '#' in line_content:
+            before_comment = line_content.split('#', maxsplit=1)[0]
+            start_idx = f'{start_line} + {len(before_comment)} chars'
+            end_idx = f'{start_line} lineend'
+            self.user_rules_text.tag_add('comment', start_idx, end_idx)
+        else:
+            before_comment = line_content
+        # Домен
+        splited = before_comment.split()
+        if splited:
+            domain = splited[0]
+            end = before_comment.find(domain)+len(domain)
+            end_idx = f'{start_line} + {end} chars'
+            self.user_rules_text.tag_add('domain', start_line, end_idx)
+        # Keywords
+        for keyword in ('EXTERN', 'DIRECT', 'BLOCK'):
+            if keyword in before_comment:
+                start = before_comment.find(keyword)
+                start_idx = f'{start_line} + {start} chars'
+                end_idx = f'{start_line} + {start+len(keyword)} chars'
+                self.user_rules_text.tag_add('keyword', start_idx, end_idx)
 
 
     def run_server(self):
