@@ -505,7 +505,17 @@ class Psiphon(Server):
         self.app.psiphon_country.set('')
         self.app.psiphon_conn_time.set('')
         self.app.psiphon_protocol.set('')
+        psiphon_log.write('server shutdown.\n')
+        try:
+            timeout = float(self.app.psiphon_restart_timeout.get())
+        except ValueError:
+            pass
+        else:
+            if timeout > 0:
+                self.app.after(int(timeout*1000), self.start)
+                psiphon_log.write(f'restart after {timeout} sec.\n')
 
+########################################################################
 
 class App(tk.Tk):
     def __init__(self):
@@ -585,8 +595,6 @@ class App(tk.Tk):
         protocol_value.grid(row=2, column=1, sticky='w', pady=2)
 
 
-
-
     def setup_control_tab(self):
         control_tab = ttk.Frame(self.notebook)
         self.notebook.add(control_tab, text=' Control ')
@@ -657,11 +665,20 @@ class App(tk.Tk):
         return response.split()
 
     def setup_config_tab(self):
-        def _entry(text, width):
-            ttk.Label(frame, padding=4, text=f'{text}:'
+        def _entry(text, cspan=False, after=None):
+            if cspan:
+                width = 10
+                columnspan = 2
+            else:
+                width = 6
+                columnspan = 1
+            ttk.Label(frame, padding=6, text=f'{text}:'
                       ).grid(row=i, column=0, sticky='w')
             en = Entry(frame, width=width)
-            en.grid(row=i, column=1, sticky='w')
+            en.grid(row=i, column=1, sticky='w', columnspan=columnspan)
+            if after:
+                ttk.Label(frame, padding=6, text=after,
+                          ).grid(row=i, column=1+columnspan, sticky='w')
             return en
         def _checkb(text, var):
             ttk.Checkbutton(frame, padding=4, text=text, variable=var,
@@ -682,37 +699,42 @@ class App(tk.Tk):
         # Labelframe 'Настройки AMProxy'
         frame = ttk.Labelframe(config_frame, text='Настройки AMProxy', padding=10)
         frame.pack(padx=15, pady=5, fill='x')
+        frame.columnconfigure(2, weight=1)
         i = 0
-        self.amproxy_host = _entry('Хост', 12)
+        self.amproxy_host = _entry('Хост', True)
         i += 1
-        self.amproxy_port = _entry('Порт', 6)
+        self.amproxy_port = _entry('Порт')
         i += 1
-        self.control_port = _entry('Порт управления', 6)
+        self.control_port = _entry('Порт управления')
         i += 1
         self.amproxy_autostart = tk.BooleanVar()
         _checkb('Автоматически запускать AMProxy при старте', self.amproxy_autostart)
         # Labelframe 'Настройки Psiphon'
         frame = ttk.Labelframe(config_frame, text='Настройки Psiphon', padding=10)
         frame.pack(padx=15, pady=5, fill='x')
+        frame.columnconfigure(2, weight=1)
         i = 0
-        self.psiphon_host = _entry('Хост', 12)
+        self.psiphon_host = _entry('Хост', True)
         i += 1
-        self.psiphon_socks5_port = _entry('Socks5 порт', 6)
+        self.psiphon_socks5_port = _entry('Socks5 порт')
         i += 1
-        self.psiphon_http_port = _entry('HTTP порт', 6)
+        self.psiphon_http_port = _entry('HTTP порт')
         i += 1
         ttk.Label(frame, padding=4, text='Регион сервера:'
                   ).grid(row=i, column=0, sticky='w')
         self.psiphon_regions = ttk.Combobox(frame, values=Psiphon.regions,
-                                            state='readonly')
+                                            width=4, state='readonly')
         self.psiphon_regions.current(0) # Делаем первый элемент (ANY) выбранным по умолчанию
-        self.psiphon_regions.grid(row=i, column=1, columnspan=2, sticky='w')
+        self.psiphon_regions.grid(row=i, column=1, columnspan=1, sticky='w')
         i += 1
         self.random_port = tk.BooleanVar()
         _checkb('Использовать случайный порт', self.random_port)
         i += 1
         self.psiphon_autostart = tk.BooleanVar()
         _checkb('Автоматически запускать Psiphon при старте', self.psiphon_autostart)
+        i += 1
+        self.psiphon_restart_timeout = _entry('Перезапускать через', after='сек.')
+
         # Кнопки "Применить" и "Сбросить настройки" в самом низу
         frame = ttk.Frame(config_frame)
         frame.pack(side='bottom', pady=15)
@@ -734,6 +756,7 @@ class App(tk.Tk):
         self.psiphon_host.replace('127.0.0.1')
         self.psiphon_http_port.replace('8080')
         self.psiphon_socks5_port.replace('1080')
+        self.psiphon_restart_timeout.replace('10')
 
 
     def setup_user_rules_tab(self):
@@ -930,6 +953,7 @@ class App(tk.Tk):
             'socks5 port': str(self.psiphon_socks5_port.get()),
             'regions': ' '.join(Psiphon.regions),
             'selected region': self.psiphon_regions.get(),
+            'restart timeout': str(self.psiphon_restart_timeout.get()),
         }
         with open(GUI_CONFIG, 'w') as configfile:
             config.write(configfile)
@@ -967,6 +991,8 @@ class App(tk.Tk):
                 self.psiphon_regions['values'] = regions
             if 'selected region' in section:
                 self.psiphon_regions.set(section['selected region'])
+            if 'restart timeout' in section:
+                self.psiphon_socks5_port.replace(section['socks5 port'])
 
 
 #
@@ -980,6 +1006,7 @@ PSIPHON_CONFIG = '''{
     "DeviceRegion": "RU",
     "EmitDiagnosticNetworkParameters": true,
     "EgressRegion": "",
+    "DisableStandardSSH": true,
     "EmitDiagnosticNotices": true,
     "EmitServerAlerts": true,
     "LocalHttpProxyPort": 8080,
